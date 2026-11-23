@@ -150,6 +150,7 @@ class RunRequest:
     schema_path: Path | None = None
     output_last_message: Path | None = None
     add_dirs: tuple[Path, ...] = ()
+    images: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -166,6 +167,7 @@ class ResumeRequest:
     schema_path: Path | None = None
     output_last_message: Path | None = None
     add_dirs: tuple[Path, ...] = ()
+    images: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -259,6 +261,43 @@ def resolve_worktree_git_common_dir(cwd: Path) -> Path | None:
     if ctx.git_common_dir == resolved_cwd or ctx.git_common_dir.is_relative_to(resolved_cwd):
         return None
     return ctx.git_common_dir
+
+
+def ensure_local_git_exclude(cwd: Path, entry: str = ".codex-use/") -> bool:
+    ctx = inspect_git_context(cwd)
+    if not ctx.is_git_repo or ctx.git_common_dir is None:
+        return False
+    normalized = entry.strip()
+    if not normalized:
+        return False
+    exclude_path = ctx.git_common_dir / "info" / "exclude"
+    exclude_path.parent.mkdir(parents=True, exist_ok=True)
+    existing_text = (
+        exclude_path.read_text(encoding="utf-8", errors="replace")
+        if exclude_path.is_file()
+        else ""
+    )
+    existing_lines = {line.strip() for line in existing_text.splitlines()}
+    bare = normalized.rstrip("/")
+    if normalized in existing_lines or (bare and bare in existing_lines):
+        return False
+    prefix = "" if (not existing_text or existing_text.endswith("\n")) else "\n"
+    with exclude_path.open("a", encoding="utf-8") as f:
+        f.write(f"{prefix}{normalized}\n")
+    return True
+
+
+def _maybe_exclude_local_prompt_dir(cwd: Path, prompt_file: str | None) -> bool:
+    if not prompt_file or prompt_file == "-":
+        return False
+    ctx = inspect_git_context(cwd)
+    if not ctx.is_git_repo or ctx.git_root is None:
+        return False
+    prompt_path = Path(prompt_file).resolve()
+    local_dir = (ctx.git_root / ".codex-use").resolve()
+    if prompt_path.is_relative_to(local_dir):
+        return ensure_local_git_exclude(cwd)
+    return False
 
 
 def resolve_ship_lock_path(cwd: Path) -> Path:
@@ -465,15 +504,36 @@ def _validate_codex_effort(effort: str) -> CodexEffort:
     return effort  # type: ignore[return-value]
 
 
+def _resolve_codex_binary(standalone_path: Path | None = None) -> tuple[str | None, str]:
+    which_path = shutil.which("codex")
+    if which_path:
+        return which_path, "path"
+    candidate = (
+        standalone_path
+        if standalone_path is not None
+        else Path.home() / ".codex" / "packages" / "standalone" / "current" / "bin" / "codex"
+    )
+    if candidate.is_file() and os.access(candidate, os.X_OK):
+        return str(candidate), "standalone"
+    return None, "missing"
+
+
+def _codex_command_binary() -> str:
+    binary, source = _resolve_codex_binary()
+    if source == "standalone" and binary is not None:
+        return binary
+    return "codex"
+
+
 class CodexAdapter:
     name: WorkerId = "codex"
 
     def preflight(self, cwd: Path) -> PreflightResult:
         issues: list[str] = []
-        binary = shutil.which("codex")
+        binary, _ = _resolve_codex_binary()
         version = _probe_binary_version(binary, ["--version"]) if binary else None
         if binary is None:
-            issues.append("codex CLI binary not found in PATH.")
+            issues.append("codex CLI binary not found in PATH or Codex Desktop standalone bundle.")
         git_ctx = inspect_git_context(cwd)
         if not cwd.exists():
             issues.append(f"Working directory does not exist: {cwd}")
@@ -521,7 +581,7 @@ class CodexAdapter:
         effort = _validate_codex_effort(req.effort or "medium")
         sandbox = "read-only" if req.mode == "scout" else "workspace-write"
         cmd = [
-            "codex",
+            _codex_command_binary(),
             "exec",
             "-s",
             sandbox,
@@ -539,6 +599,8 @@ class CodexAdapter:
             cmd.extend(["-m", req.model])
         for extra_dir in req.add_dirs:
             cmd.extend(["--add-dir", str(extra_dir)])
+        for img in req.images:
+            cmd.extend(["--image", str(img)])
         cmd.append("-")
         return cmd
 
@@ -547,7 +609,7 @@ class CodexAdapter:
             raise ValidationError("resume requires a non-empty --session id.")
         effort = _validate_codex_effort(req.effort) if req.effort is not None else None
         # `codex exec resume` rejects `-s` and `-C`; cwd is passed via subprocess `cwd=`.
-        cmd = ["codex", "exec", "resume", req.session_id, "--json"]
+        cmd = [_codex_command_binary(), "exec", "resume", req.session_id, "--json"]
         if req.output_last_message is not None:
             cmd.extend(["-o", str(req.output_last_message)])
         if req.schema_path is not None:
@@ -556,6 +618,8 @@ class CodexAdapter:
             cmd.extend(["-c", f'model_reasoning_effort="{effort}"'])
         if req.model:
             cmd.extend(["-m", req.model])
+        for img in req.images:
+            cmd.extend(["--image", str(img)])
         cmd.append("-")
         return cmd
 
@@ -565,7 +629,7 @@ class CodexAdapter:
         )
         if selectors > 1:
             raise ValidationError("Specify at most one of --base, --uncommitted, or --commit.")
-        cmd = ["codex", "exec", "review", "--json"]
+        cmd = [_codex_command_binary(), "exec", "review", "--json"]
         if req.base is not None:
             cmd.extend(["--base", req.base])
         elif req.commit is not None:
@@ -742,6 +806,11 @@ class DshAdapter:
         return dirs
 
     def build_run_cmd(self, req: RunRequest) -> list[str]:
+        if req.images:
+            raise ValidationError(
+                "dsh --profile headless does not support --image attachments. "
+                "Remove --image or use --worker codex."
+            )
         perm, policy = _resolve_dsh_permissions(
             req.mode, req.permission_mode, req.approval_policy, req.allow_danger
         )
@@ -762,6 +831,11 @@ class DshAdapter:
     def build_resume_cmd(self, req: ResumeRequest) -> list[str]:
         if not req.session_id.strip():
             raise ValidationError("resume requires a non-empty --session id.")
+        if req.images:
+            raise ValidationError(
+                "dsh --profile headless does not support --image attachments. "
+                "Remove --image or use --worker codex."
+            )
         perm, policy = _resolve_dsh_permissions(
             req.mode, req.permission_mode, req.approval_policy, req.allow_danger
         )
@@ -1081,6 +1155,7 @@ def create_worktree(
         raise DriverRuntimeError(
             f"git worktree add failed: {(add_res.stderr or add_res.stdout).strip()}"
         )
+    ensure_local_git_exclude(repo_root)
     lock_file = resolve_ship_lock_path(target_dir)
     return {
         "ok": True,
@@ -1264,6 +1339,16 @@ def _handle_worktree_remove(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _resolve_image_paths(raw_images: list[str] | None) -> tuple[Path, ...]:
+    resolved: list[Path] = []
+    for raw in raw_images or []:
+        path = Path(raw)
+        if not path.is_file():
+            raise ValidationError(f"Image file does not exist: {path}")
+        resolved.append(path.resolve())
+    return tuple(resolved)
+
+
 def _handle_run(args: argparse.Namespace) -> int:
     adapter = get_adapter(args.worker)
     cwd = Path(args.cwd)
@@ -1274,6 +1359,7 @@ def _handle_run(args: argparse.Namespace) -> int:
         raise ValidationError(f"Schema file does not exist: {schema_path}")
     out_msg = Path(args.output_last_message) if args.output_last_message else None
     add_dirs = tuple(Path(p) for p in (args.add_dir or []))
+    images = _resolve_image_paths(args.image)
     req = RunRequest(
         worker=adapter.name,
         mode=args.mode,
@@ -1286,9 +1372,11 @@ def _handle_run(args: argparse.Namespace) -> int:
         schema_path=schema_path.resolve() if schema_path else None,
         output_last_message=out_msg.resolve() if out_msg else None,
         add_dirs=add_dirs,
+        images=images,
     )
     cmd = adapter.build_run_cmd(req)
     prompt = _read_prompt(args.prompt_file, args.prompt, required=True)
+    _maybe_exclude_local_prompt_dir(req.cwd, args.prompt_file)
     log_path = _prepare_log_path(Path(args.log_dir) if args.log_dir else None, adapter.name, req.mode)
 
     lock_cm = (
@@ -1321,6 +1409,7 @@ def _handle_resume(args: argparse.Namespace) -> int:
         raise ValidationError(f"Schema file does not exist: {schema_path}")
     out_msg = Path(args.output_last_message) if args.output_last_message else None
     add_dirs = tuple(Path(p) for p in (args.add_dir or []))
+    images = _resolve_image_paths(args.image)
     req = ResumeRequest(
         worker=adapter.name,
         session_id=args.session,
@@ -1334,9 +1423,11 @@ def _handle_resume(args: argparse.Namespace) -> int:
         schema_path=schema_path.resolve() if schema_path else None,
         output_last_message=out_msg.resolve() if out_msg else None,
         add_dirs=add_dirs,
+        images=images,
     )
     cmd = adapter.build_resume_cmd(req)
     prompt = _read_prompt(args.prompt_file, args.prompt, required=True)
+    _maybe_exclude_local_prompt_dir(req.cwd, args.prompt_file)
     log_path = _prepare_log_path(Path(args.log_dir) if args.log_dir else None, adapter.name, req.mode)
 
     lock_cm = (
@@ -1391,6 +1482,7 @@ def _handle_review(args: argparse.Namespace) -> int:
         )
         return EXIT_ERROR
 
+    _maybe_exclude_local_prompt_dir(req.cwd, args.prompt_file)
     log_path = _prepare_log_path(Path(args.log_dir) if args.log_dir else None, adapter.name, "review")
     summary = _execute_worker(
         adapter=adapter,
@@ -1478,6 +1570,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--schema")
     p_run.add_argument("--output-last-message")
     p_run.add_argument("--add-dir", action="append")
+    p_run.add_argument("--image", action="append")
     p_run.add_argument("--log-dir")
     p_run.add_argument("--base")
     p_run.set_defaults(handler=_handle_run)
@@ -1497,6 +1590,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_res.add_argument("--schema")
     p_res.add_argument("--output-last-message")
     p_res.add_argument("--add-dir", action="append")
+    p_res.add_argument("--image", action="append")
     p_res.add_argument("--log-dir")
     p_res.add_argument("--base")
     p_res.set_defaults(handler=_handle_resume)
