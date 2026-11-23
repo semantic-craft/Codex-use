@@ -27,8 +27,9 @@ Codex-use 将这些规则直接编码进 `scripts/drive.py` 的结构与边界�
        └─ DshAdapter   + workers/dsh.md     （dsh --profile headless）
 ```
 
-- **自包含技能目录。** 运行所需的协议文档、Schema 与脚本全部集中在 `skills/codex-use/` 内部，单独复制或软链接该目录即可完整工作。
-- **零第三方依赖。** `scripts/drive.py` 仅使用 Python 3.10+ 标准库。
+- **自包含技能目录。** 运行所需的协议文档、Worker/宿主配置、`templates/` 任务模板、Schema 与脚本全部集中在 `skills/codex-use/` 内部，单独复制或软链接该目录即可完整工作。
+- **零第三方依赖。** `scripts/drive.py` 仅使用 Python 3.10+ 标准库；当 `PATH` 中未安装 `codex` 时，自动回退检测 Codex Desktop 自带的独立二进制（`~/.codex/packages/standalone/current/bin/codex`）。
+- **本地任务单自动排除与有界返工。** 放在仓库 `.codex-use/` 下的任务单会自动幂等写入 `<git_common_dir>/info/exclude`（不污染受跟踪的 `.gitignore`）；`auto-fix` 同会话自修上限为 2 轮，超限即停机升级人工裁决。
 
 ## 安装方式
 
@@ -84,7 +85,7 @@ python3 skills/codex-use/scripts/drive.py run \
 
 ### 3. 隔离实现（`ship`）
 
-创建独立 linked worktree，带互斥写锁执行实现切片，并通过 stdout 返回结构化 `AuditSummary`：
+可基于 `skills/codex-use/templates/ship-task.md` 或 `bugfix-task.md`（只读侦察用 `scout-task.md`）撰写任务单，创建独立 linked worktree，带互斥写锁执行实现切片（`--worker codex` 支持重复传入 `--image <path>` 附加视觉参考图），并通过 stdout 返回结构化 `AuditSummary`：
 
 ```bash
 python3 skills/codex-use/scripts/drive.py worktree create --repo /path/to/repo --task fix-retry
@@ -95,13 +96,14 @@ python3 skills/codex-use/scripts/drive.py run \
   --effort high \
   --cwd /path/to/.worktrees/repo/fix-retry \
   --base <base_sha> \
+  --image /path/to/mock.png \
   --schema skills/codex-use/schemas/receipt.schema.json \
-  --prompt-file /tmp/slice-prompt.md
+  --prompt-file /path/to/.worktrees/repo/fix-retry/.codex-use/slice-prompt.md
 ```
 
-### 4. 同会话自修（`resume`）
+### 4. 同会话自修（`resume`，最多 2 轮）
 
-本地差分审计或验证发现缺陷时，直接回到同一会话按精确 `file:line` 纠偏：
+本地差分审计或验证发现缺陷时，直接回到同一会话按精确 `file:line` 纠偏；连续 2 轮自动返工仍未通过时停止循环，将阻塞点与差分升级给用户处理：
 
 ```bash
 python3 skills/codex-use/scripts/drive.py resume \

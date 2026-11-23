@@ -18,6 +18,7 @@ Read this profile when running `scripts/drive.py` with `--worker dsh`. Do not co
 - `scout` defaults to `--permission-mode read-only --approval-policy never`.
 - `ship` defaults to `--permission-mode workspace-write --approval-policy never`.
 - `danger-full-access` is rejected with exit code `2` unless `--allow-danger` is explicitly supplied. Avoid it in normal worktree workflows.
+- `--image` attachments are explicitly rejected with exit code `2` because `dsh --profile headless` does not support image attachments (never silently dropped). Use `--worker codex` when a slice needs screenshots or visual references.
 
 ## 3. Linked Git Worktree `.git` Access
 

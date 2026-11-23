@@ -20,6 +20,7 @@ Load only the profile files matching your active environment.
 
 - Workers: [`workers/codex.md`](workers/codex.md) or [`workers/dsh.md`](workers/dsh.md).
 - Hosts: [`hosts/antigravity.md`](hosts/antigravity.md), [`hosts/grok-bot.md`](hosts/grok-bot.md), or [`hosts/dsh.md`](hosts/dsh.md).
+- Task templates: [`templates/scout-task.md`](templates/scout-task.md), [`templates/ship-task.md`](templates/ship-task.md), and [`templates/bugfix-task.md`](templates/bugfix-task.md).
 - Completion receipt contract: [`schemas/receipt.schema.json`](schemas/receipt.schema.json).
 
 ## 2. Operating Modes
@@ -65,7 +66,7 @@ python3 skills/codex-use/scripts/drive.py worktree create --repo /path/to/repo -
 
 ### Phase 2. Worker Execution
 
-Compose a focused prompt file and dispatch through `scripts/drive.py run`.
+Compose a focused prompt file (starting from [`templates/ship-task.md`](templates/ship-task.md) or [`templates/bugfix-task.md`](templates/bugfix-task.md); use [`templates/scout-task.md`](templates/scout-task.md) for `scout`) and dispatch through `scripts/drive.py run`. Store repo-local task briefs under `.codex-use/`; `drive.py` registers `.codex-use/` idempotently in `<git_common_dir>/info/exclude` without editing tracked `.gitignore`. Pass repeatable `--image <path>` flags for UI or visual references on `--worker codex`.
 
 ```bash
 python3 skills/codex-use/scripts/drive.py run \
@@ -74,7 +75,7 @@ python3 skills/codex-use/scripts/drive.py run \
   --cwd /path/to/worktree \
   --base <base_sha> \
   --schema skills/codex-use/schemas/receipt.schema.json \
-  --prompt-file /tmp/slice-prompt.md
+  --prompt-file /path/to/worktree/.codex-use/slice-prompt.md
 ```
 
 Every `ship` prompt must include five concrete blocks (`scout` omits write authorization):
@@ -95,7 +96,7 @@ Never accept worker prose at face value. Complete all three independent checks b
 
 Route every audit finding into one of two buckets.
 
-- **`auto-fix` (same-thread resume).** Pure correctness bugs, security issues, missing edge cases, failing tests, code-golfing, or over-engineering. Send a targeted fix prompt back to the same worker thread with exact `file:line` citations and the verification command, then repeat all three checks until clean:
+- **`auto-fix` (same-thread resume, max 2 automatic rounds).** Pure correctness bugs, security issues, missing edge cases, failing tests, code-golfing, or over-engineering. Send a targeted fix prompt back to the same worker thread with exact `file:line` citations and the verification command, then repeat all three checks. Cap automatic rework at **2 `drive.py resume` rounds**. If checks still fail after 2 rework rounds, halt and escalate the blocker, current `git diff`, and verification output to the user instead of looping indefinitely:
 
 ```bash
 python3 skills/codex-use/scripts/drive.py resume \
@@ -104,7 +105,7 @@ python3 skills/codex-use/scripts/drive.py resume \
   --mode ship \
   --cwd /path/to/worktree \
   --base <base_sha> \
-  --prompt-file /tmp/autofix-prompt.md
+  --prompt-file /path/to/worktree/.codex-use/autofix-prompt.md
 ```
 
 - **`ask-user` (escalate and pause).** Product behavior choices, external API or schema contract changes, irreversible actions, or tradeoffs outside authorized scope. Present clear options, concrete impact, and a recommendation. **User silence or timeout is never consent, rejection, or permission to skip.** Keep the decision pending until an explicit answer arrives.

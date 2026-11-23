@@ -27,8 +27,9 @@ Host (Antigravity / Grok Bot / DSH / any SKILL.md agent)
        └─ DshAdapter   + workers/dsh.md     (dsh --profile headless)
 ```
 
-- **Self-contained skill folder.** Everything needed at runtime lives inside `skills/codex-use/`. Copying or symlinking that directory alone preserves all relative links and scripts.
-- **Zero third-party dependencies.** `scripts/drive.py` uses Python 3.10+ standard library modules only.
+- **Self-contained skill folder.** Everything needed at runtime lives inside `skills/codex-use/` (protocol, worker/host profiles, task templates under `templates/`, receipt schema, and `scripts/drive.py`). Copying or symlinking that directory alone preserves all relative links and scripts.
+- **Zero third-party dependencies.** `scripts/drive.py` uses Python 3.10+ standard library modules only, and falls back to Codex Desktop's standalone binary (`~/.codex/packages/standalone/current/bin/codex`) when `codex` is not on `PATH`.
+- **Clean local specs and bounded retries.** Task specs placed under `.codex-use/` are automatically excluded in `<git_common_dir>/info/exclude` (never modifying `.gitignore`), and automatic `auto-fix` resumes are capped at 2 rounds before escalating to the user.
 
 ## Installation
 
@@ -84,7 +85,7 @@ python3 skills/codex-use/scripts/drive.py run \
 
 ### 3. Isolated `ship`
 
-Create a linked worktree, run a scoped change with exclusive lock protection, and inspect the structured `AuditSummary` returned on stdout:
+Start from `skills/codex-use/templates/ship-task.md` or `skills/codex-use/templates/bugfix-task.md` (use `templates/scout-task.md` for `scout`), create a linked worktree, run a scoped change with exclusive lock protection (optionally passing repeatable `--image <path>` flags on `--worker codex`), and inspect the structured `AuditSummary` returned on stdout:
 
 ```bash
 python3 skills/codex-use/scripts/drive.py worktree create --repo /path/to/repo --task fix-retry
@@ -95,13 +96,14 @@ python3 skills/codex-use/scripts/drive.py run \
   --effort high \
   --cwd /path/to/.worktrees/repo/fix-retry \
   --base <base_sha> \
+  --image /path/to/mock.png \
   --schema skills/codex-use/schemas/receipt.schema.json \
-  --prompt-file /tmp/slice-prompt.md
+  --prompt-file /path/to/.worktrees/repo/fix-retry/.codex-use/slice-prompt.md
 ```
 
-### 4. Same-thread `resume` (`auto-fix`)
+### 4. Same-thread `resume` (`auto-fix`, max 2 rounds)
 
-Continue an existing session when local diff audit or verification finds issues:
+Continue an existing session when local diff audit or verification finds issues (halt and escalate to the user if checks still fail after 2 rework rounds):
 
 ```bash
 python3 skills/codex-use/scripts/drive.py resume \

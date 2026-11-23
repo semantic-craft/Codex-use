@@ -8,10 +8,15 @@ Read this profile when running `scripts/drive.py` with `--worker codex`. Keep Co
 
 | Operation | Underlying CLI invocation | Notes |
 | --- | --- | --- |
-| `scout` | `codex exec -s read-only -C <cwd> -c model_reasoning_effort="<effort>" --json -` | Prompt arrives on stdin to avoid shell quoting bugs. |
-| `ship` | `codex exec -s workspace-write -C <cwd> -c model_reasoning_effort="<effort>" --json [--output-schema <schema>] -` | Acquires exclusive worktree lock before launch. |
-| `resume` | `codex exec resume <session_id> --json [-c model_reasoning_effort="<effort>"] -` | Never passes `-s` or `-C` (rejected by `codex exec resume`); sets subprocess `cwd` instead. |
+| `scout` | `codex exec -s read-only -C <cwd> -c model_reasoning_effort="<effort>" --json [--image <path> ...] -` | Prompt arrives on stdin to avoid shell quoting bugs. |
+| `ship` | `codex exec -s workspace-write -C <cwd> -c model_reasoning_effort="<effort>" --json [--output-schema <schema>] [--image <path> ...] -` | Acquires exclusive worktree lock before launch. |
+| `resume` | `codex exec resume <session_id> --json [-c model_reasoning_effort="<effort>"] [--image <path> ...] -` | Never passes `-s` or `-C` (rejected by `codex exec resume`); sets subprocess `cwd` instead. |
 | `review` | `codex exec review --json [--base <branch> \| --uncommitted \| --commit <sha>] [-]` | Runs in subprocess `cwd`. |
+
+### Binary Resolution and Image Attachments
+
+- **Codex Desktop standalone fallback.** `CodexAdapter` checks `codex` in `PATH` first. If absent, it falls back to `~/.codex/packages/standalone/current/bin/codex` when executable, so Codex Desktop installations work without manual `PATH` edits.
+- **Image attachments (`--image`).** Pass repeatable `--image <path>` flags on `drive.py run` or `drive.py resume` to forward screenshots or UI mocks directly to Codex. `drive.py` verifies every image file exists before spawning and exits with code `2` if missing.
 
 ## 2. Reasoning Effort Tiers (`ultra` Is Forbidden)
 
