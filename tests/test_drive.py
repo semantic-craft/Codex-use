@@ -669,8 +669,19 @@ class RepositoryContractTests(unittest.TestCase):
         )
         self.assertEqual(
             schema["required"],
-            ["changed_files", "verification", "assumptions_and_risks", "symbol_changes"],
+            ["summary", "changed_files", "verification", "assumptions_and_risks", "symbol_changes"],
         )
+
+        def assert_strict_object_schema(node: dict) -> None:
+            if node.get("type") == "object":
+                self.assertIs(node.get("additionalProperties"), False)
+                self.assertEqual(set(node.get("required", [])), set(node.get("properties", {}).keys()))
+                for child in node.get("properties", {}).values():
+                    assert_strict_object_schema(child)
+            elif node.get("type") == "array" and isinstance(node.get("items"), dict):
+                assert_strict_object_schema(node["items"])
+
+        assert_strict_object_schema(schema)
 
     def test_skill_frontmatter_and_self_contained_relative_links(self) -> None:
         skill_md = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")

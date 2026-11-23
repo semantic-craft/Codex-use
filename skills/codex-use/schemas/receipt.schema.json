@@ -6,6 +6,7 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
+    "summary",
     "changed_files",
     "verification",
     "assumptions_and_risks",
