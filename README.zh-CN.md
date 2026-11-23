@@ -38,7 +38,7 @@ Codex-use 将这些规则直接编码进 `scripts/drive.py` 的结构与边界�
 将自包含的技能目录软链接到全局 Skills 目录，所有支持 `SKILL.md` 的宿主均可直接发现：
 
 ```bash
-git clone <repo-url> Codex-use
+git clone https://github.com/semantic-craft/Codex-use.git Codex-use
 mkdir -p ~/.agents/skills
 ln -s "$(pwd)/Codex-use/skills/codex-use" ~/.agents/skills/codex-use
 ```

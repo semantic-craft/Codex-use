@@ -38,7 +38,7 @@ Host (Antigravity / Grok Bot / DSH / any SKILL.md agent)
 Symlink the self-contained skill folder so any `SKILL.md`-compatible agent discovers it:
 
 ```bash
-git clone <repo-url> Codex-use
+git clone https://github.com/semantic-craft/Codex-use.git Codex-use
 mkdir -p ~/.agents/skills
 ln -s "$(pwd)/Codex-use/skills/codex-use" ~/.agents/skills/codex-use
 ```
