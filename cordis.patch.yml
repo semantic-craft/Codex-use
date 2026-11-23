@@ -1,0 +1,7 @@
+- insert:
+    - id: codex-use-skills
+      name: '@deepseek-ai/dsh-skill-filesystem'
+      config:
+        providerName: codex-use
+        includeDefaultRoots: false
+        bundledSkillDir: ./skills

@@ -1,0 +1,30 @@
+{
+  "name": "codex-use",
+  "version": "0.1.0",
+  "description": "Standalone open-source skill and zero-dependency runner for driving Codex CLI and DeepSeek Harness in isolated git worktrees with real-command JSONL verification.",
+  "license": "Apache-2.0",
+  "keywords": [
+    "codex",
+    "codex-use",
+    "deepseek-harness",
+    "dsh",
+    "agent-skill",
+    "git-worktree"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "exports": {
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "cordis.patch.yml",
+    "skills/",
+    "LICENSE",
+    "README.md",
+    "README.zh-CN.md"
+  ]
+}
