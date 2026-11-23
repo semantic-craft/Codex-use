@@ -68,7 +68,18 @@ FILE_WRITE_TOOL_NAMES: frozenset[str] = frozenset(
         "patch_file",
     }
 )
-OUTPUT_PREVIEW_LIMIT = 400
+OUTPUT_PREVIEW_LIMIT = 160
+FULL_OUTPUT_PREVIEW_LIMIT = 400
+SAFE_DISPOSABLE_NAMES: frozenset[str] = frozenset(
+    {
+        ".codex-use",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".DS_Store",
+    }
+)
 
 
 class ValidationError(Exception):
@@ -129,7 +140,7 @@ class AuditSummary:
     changed_files: list[str]
     git_diff_files: list[str]
     errors: list[str]
-    final_message: str
+    final_message: str | None
     receipt: dict[str, Any] | None
     receipt_valid: bool | None
     usage: dict[str, Any] | None
@@ -202,7 +213,9 @@ class WorkerAdapter(Protocol):
 
     def build_review_cmd(self, req: ReviewRequest) -> list[str] | None: ...
 
-    def parse_jsonl(self, lines: Iterable[str]) -> ParsedEvents: ...
+    def parse_jsonl(
+        self, lines: Iterable[str], preview_limit: int = OUTPUT_PREVIEW_LIMIT
+    ) -> ParsedEvents: ...
 
 
 def _preview(text: Any, limit: int = OUTPUT_PREVIEW_LIMIT) -> str:
@@ -644,7 +657,9 @@ class CodexAdapter:
             cmd.append("-")
         return cmd
 
-    def parse_jsonl(self, lines: Iterable[str]) -> ParsedEvents:
+    def parse_jsonl(
+        self, lines: Iterable[str], preview_limit: int = OUTPUT_PREVIEW_LIMIT
+    ) -> ParsedEvents:
         session_id: str | None = None
         commands: list[CommandRecord] = []
         changed_files: list[str] = []
@@ -684,7 +699,8 @@ class CodexAdapter:
                             exit_code=exit_code,
                             status=str(item.get("status", "")),
                             output_preview=_preview(
-                                item.get("aggregated_output") or item.get("output") or ""
+                                item.get("aggregated_output") or item.get("output") or "",
+                                limit=preview_limit,
                             ),
                         )
                     )
@@ -858,7 +874,9 @@ class DshAdapter:
     def build_review_cmd(self, req: ReviewRequest) -> list[str] | None:
         return None
 
-    def parse_jsonl(self, lines: Iterable[str]) -> ParsedEvents:
+    def parse_jsonl(
+        self, lines: Iterable[str], preview_limit: int = OUTPUT_PREVIEW_LIMIT
+    ) -> ParsedEvents:
         session_id: str | None = None
         commands: list[CommandRecord] = []
         changed_files: list[str] = []
@@ -927,7 +945,8 @@ class DshAdapter:
                         exit_code=exit_code,
                         status=str(event.get("status", "completed")),
                         output_preview=_preview(
-                            event.get("aggregated_output") or event.get("output") or ""
+                            event.get("aggregated_output") or event.get("output") or "",
+                            limit=preview_limit,
                         ),
                     )
                 )
@@ -964,7 +983,8 @@ class DshAdapter:
                             exit_code=raw_exit if isinstance(raw_exit, int) else None,
                             status=str(event.get("status", "completed")),
                             output_preview=_preview(
-                                event.get("output") or event.get("result") or ""
+                                event.get("output") or event.get("result") or "",
+                                limit=preview_limit,
                             ),
                         )
                     )
@@ -1020,11 +1040,13 @@ class DshAdapter:
                             command=cmd_str,
                             exit_code=exit_code,
                             status=status,
-                            output_preview=_preview(output_val),
+                            output_preview=_preview(output_val, limit=preview_limit),
                         )
                     )
                 if event.get("isError"):
-                    err = _extract_error_text(event.get("error")) or _preview(output_val)
+                    err = _extract_error_text(event.get("error")) or _preview(
+                        output_val, limit=preview_limit
+                    )
                     if err:
                         _append_unique(errors, err)
             elif etype == "item.completed":
@@ -1041,7 +1063,8 @@ class DshAdapter:
                                 exit_code=raw_exit if isinstance(raw_exit, int) else None,
                                 status=str(item.get("status", "")),
                                 output_preview=_preview(
-                                    item.get("aggregated_output") or item.get("output") or ""
+                                    item.get("aggregated_output") or item.get("output") or "",
+                                    limit=preview_limit,
                                 ),
                             )
                         )
@@ -1168,6 +1191,78 @@ def create_worktree(
     }
 
 
+def _collect_safe_disposable_paths(wt_resolved: Path) -> list[Path]:
+    status_res = _run_git(
+        wt_resolved, ["status", "--porcelain", "-z", "-uall", "--ignored=matching"]
+    )
+    if status_res.returncode != 0:
+        return []
+    entries = [token for token in status_res.stdout.split("\0") if token]
+    targets: list[Path] = []
+    seen: set[Path] = set()
+    for entry in entries:
+        if len(entry) < 4:
+            return []
+        xy = entry[:2]
+        if xy not in {"??", "!!"}:
+            return []
+        rel = entry[3:].rstrip("/")
+        rel_path = Path(rel)
+        if rel_path.is_absolute() or ".." in rel_path.parts:
+            return []
+        parts = rel_path.parts
+        safe_idx = next(
+            (idx for idx, part in enumerate(parts) if part in SAFE_DISPOSABLE_NAMES),
+            None,
+        )
+        if safe_idx is None:
+            return []
+        candidate = (wt_resolved.joinpath(*parts[: safe_idx + 1])).resolve()
+        if candidate == wt_resolved or not candidate.is_relative_to(wt_resolved):
+            return []
+        if candidate not in seen:
+            seen.add(candidate)
+            targets.append(candidate)
+    return targets
+
+
+def _clean_safe_disposables(wt_resolved: Path) -> list[str]:
+    targets = _collect_safe_disposable_paths(wt_resolved)
+    cleaned: list[str] = []
+    for target in targets:
+        if not target.exists() and not target.is_symlink():
+            continue
+        if target.is_dir() and not target.is_symlink():
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+        cleaned.append(str(target.relative_to(wt_resolved)))
+        parent = target.parent
+        while parent != wt_resolved and parent.is_relative_to(wt_resolved):
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+    return cleaned
+
+
+def _prune_empty_worktree_parents(wt_resolved: Path) -> None:
+    parent = wt_resolved.parent
+    grandparent = parent.parent
+    if grandparent.name == ".worktrees":
+        for candidate in (parent, grandparent):
+            try:
+                candidate.rmdir()
+            except OSError:
+                break
+    elif parent.name == ".worktrees":
+        try:
+            parent.rmdir()
+        except OSError:
+            pass
+
+
 def remove_worktree(
     repo: Path,
     worktree: Path,
@@ -1189,7 +1284,10 @@ def remove_worktree(
         if candidate and candidate != "HEAD":
             branch_name = candidate
 
+    cleaned_caches: list[str] = []
     with acquire_ship_lock(wt_resolved, "remove"):
+        if not force:
+            cleaned_caches = _clean_safe_disposables(wt_resolved)
         args = ["worktree", "remove"]
         if force:
             args.append("--force")
@@ -1199,6 +1297,8 @@ def remove_worktree(
             raise DriverRuntimeError(
                 f"git worktree remove failed: {(rem_res.stderr or rem_res.stdout).strip()}"
             )
+
+    _prune_empty_worktree_parents(wt_resolved)
 
     branch_deleted = False
     if delete_branch and branch_name:
@@ -1212,6 +1312,7 @@ def remove_worktree(
         "removed": str(wt_resolved),
         "branch": branch_name,
         "branch_deleted": branch_deleted,
+        "cleaned_caches": cleaned_caches,
     }
 
 
@@ -1254,6 +1355,7 @@ def _execute_worker(
     log_path: Path,
     output_last_message: Path | None,
     base_sha: str | None = None,
+    full_output: bool = False,
 ) -> AuditSummary:
     stderr_path = log_path.with_suffix(".stderr.log")
     try:
@@ -1272,14 +1374,15 @@ def _execute_worker(
     except FileNotFoundError as exc:
         raise DriverRuntimeError(f"Worker binary not found when executing: {cmd[0]}") from exc
 
+    preview_limit = FULL_OUTPUT_PREVIEW_LIMIT if full_output else OUTPUT_PREVIEW_LIMIT
     with log_path.open("r", encoding="utf-8", errors="replace") as f:
-        parsed = adapter.parse_jsonl(f)
+        parsed = adapter.parse_jsonl(f, preview_limit=preview_limit)
 
-    final_message = parsed.final_message
+    raw_final_message = parsed.final_message
     if output_last_message is not None and output_last_message.is_file():
         file_msg = output_last_message.read_text(encoding="utf-8", errors="replace").strip()
         if file_msg:
-            final_message = file_msg
+            raw_final_message = file_msg
 
     errors = list(parsed.errors)
     if proc.returncode != 0 and not errors:
@@ -1287,7 +1390,10 @@ def _execute_worker(
         if stderr_text:
             _append_unique(errors, _preview(stderr_text, limit=600))
 
-    receipt, receipt_valid = parse_receipt(final_message)
+    receipt, receipt_valid = parse_receipt(raw_final_message)
+    summary_final_message: str | None = (
+        None if (receipt_valid is True and not full_output) else raw_final_message
+    )
     git_diff_files = collect_git_diff_files(cwd, base=base_sha)
 
     return AuditSummary(
@@ -1299,7 +1405,7 @@ def _execute_worker(
         changed_files=parsed.changed_files,
         git_diff_files=git_diff_files,
         errors=errors,
-        final_message=final_message,
+        final_message=summary_final_message,
         receipt=receipt,
         receipt_valid=receipt_valid,
         usage=parsed.usage,
@@ -1322,8 +1428,30 @@ def _handle_preflight(args: argparse.Namespace) -> int:
 
 
 def _handle_worktree_create(args: argparse.Namespace) -> int:
+    if args.preflight and not args.worker:
+        raise ValidationError("--preflight requires --worker <codex|dsh>.")
+    repo_path = Path(args.repo)
+    preflight_dict: dict[str, Any] | None = None
+    if args.preflight:
+        adapter = get_adapter(args.worker)
+        ctx = inspect_git_context(repo_path)
+        pf_target = ctx.git_root if (ctx.is_git_repo and ctx.git_root is not None) else repo_path
+        pf = adapter.preflight(pf_target)
+        preflight_dict = dataclasses.asdict(pf)
+        if not pf.ok:
+            _emit_json(
+                {
+                    "ok": False,
+                    "error": "preflight_failed",
+                    "preflight": preflight_dict,
+                }
+            )
+            return EXIT_ERROR
+
     wt_dir = Path(args.worktree_dir) if args.worktree_dir else None
-    result = create_worktree(Path(args.repo), args.task, base=args.base, worktree_dir=wt_dir)
+    result = create_worktree(repo_path, args.task, base=args.base, worktree_dir=wt_dir)
+    if preflight_dict is not None:
+        result["preflight"] = preflight_dict
     _emit_json(result)
     return EXIT_OK
 
@@ -1394,6 +1522,7 @@ def _handle_run(args: argparse.Namespace) -> int:
             log_path=log_path,
             output_last_message=req.output_last_message,
             base_sha=args.base,
+            full_output=args.full_output,
         )
     _emit_json(summary)
     return EXIT_OK if summary.exit_code == 0 else EXIT_ERROR
@@ -1445,6 +1574,7 @@ def _handle_resume(args: argparse.Namespace) -> int:
             log_path=log_path,
             output_last_message=req.output_last_message,
             base_sha=args.base,
+            full_output=args.full_output,
         )
     _emit_json(summary)
     return EXIT_OK if summary.exit_code == 0 else EXIT_ERROR
@@ -1493,6 +1623,7 @@ def _handle_review(args: argparse.Namespace) -> int:
         log_path=log_path,
         output_last_message=req.output_last_message,
         base_sha=args.base,
+        full_output=args.full_output,
     )
     _emit_json(summary)
     return EXIT_OK if summary.exit_code == 0 else EXIT_ERROR
@@ -1503,11 +1634,15 @@ def _handle_audit(args: argparse.Namespace) -> int:
     log_path = Path(args.log)
     if not log_path.is_file():
         raise ValidationError(f"Log file does not exist: {log_path}")
+    preview_limit = FULL_OUTPUT_PREVIEW_LIMIT if args.full_output else OUTPUT_PREVIEW_LIMIT
     with log_path.open("r", encoding="utf-8", errors="replace") as f:
-        parsed = adapter.parse_jsonl(f)
+        parsed = adapter.parse_jsonl(f, preview_limit=preview_limit)
     cwd = Path(args.cwd).resolve() if args.cwd else None
     git_diff_files = collect_git_diff_files(cwd, base=args.base)
     receipt, receipt_valid = parse_receipt(parsed.final_message)
+    summary_final_message: str | None = (
+        None if (receipt_valid is True and not args.full_output) else parsed.final_message
+    )
     summary = AuditSummary(
         worker=adapter.name,
         mode=args.mode,
@@ -1517,7 +1652,7 @@ def _handle_audit(args: argparse.Namespace) -> int:
         changed_files=parsed.changed_files,
         git_diff_files=git_diff_files,
         errors=parsed.errors,
-        final_message=parsed.final_message,
+        final_message=summary_final_message,
         receipt=receipt,
         receipt_valid=receipt_valid,
         usage=parsed.usage,
@@ -1547,6 +1682,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_wt_create.add_argument("--task", required=True)
     p_wt_create.add_argument("--base", default="HEAD")
     p_wt_create.add_argument("--worktree-dir")
+    p_wt_create.add_argument("--preflight", action="store_true")
+    p_wt_create.add_argument("--worker", choices=sorted(ADAPTERS))
     p_wt_create.set_defaults(handler=_handle_worktree_create)
 
     p_wt_remove = wt_sub.add_parser("remove", help="Remove a linked worktree safely.")
@@ -1573,6 +1710,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--image", action="append")
     p_run.add_argument("--log-dir")
     p_run.add_argument("--base")
+    p_run.add_argument("--full-output", action="store_true")
     p_run.set_defaults(handler=_handle_run)
 
     p_res = subparsers.add_parser("resume", help="Resume an existing worker session in the same thread.")
@@ -1593,6 +1731,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_res.add_argument("--image", action="append")
     p_res.add_argument("--log-dir")
     p_res.add_argument("--base")
+    p_res.add_argument("--full-output", action="store_true")
     p_res.set_defaults(handler=_handle_resume)
 
     p_rev = subparsers.add_parser("review", help="Run non-interactive diff review.")
@@ -1606,6 +1745,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_rev.add_argument("--prompt")
     p_rev.add_argument("--output-last-message")
     p_rev.add_argument("--log-dir")
+    p_rev.add_argument("--full-output", action="store_true")
     p_rev.set_defaults(handler=_handle_review)
 
     p_aud = subparsers.add_parser("audit", help="Parse an existing worker JSONL log into an AuditSummary.")
@@ -1615,6 +1755,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_aud.add_argument("--base")
     p_aud.add_argument("--mode", default="ship", choices=["scout", "ship", "review"])
     p_aud.add_argument("--exit-code", type=int, default=0)
+    p_aud.add_argument("--full-output", action="store_true")
     p_aud.set_defaults(handler=_handle_audit)
 
     return parser
