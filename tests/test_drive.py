@@ -442,7 +442,97 @@ class CodexAdapterTests(unittest.TestCase):
             summary = json.loads(proc.stdout)
             self.assertEqual(summary["session_id"], "019c9999-aaaa-7bbb-8ccc-111122223333")
             self.assertTrue(summary["receipt_valid"])
+            self.assertIsNone(summary["final_message"])
             self.assertEqual(summary["receipt"]["changed_files"], ["src/retry.py", "tests/test_retry.py"])
+
+    def test_compact_audit_summary_vs_full_output_and_plain_message(self) -> None:
+        long_output = "X" * 300
+        receipt_obj = {
+            "summary": "Verified fix.",
+            "changed_files": ["src/a.py"],
+            "verification": [{"command": "pytest", "exit_code": 0, "summary": "ok"}],
+            "assumptions_and_risks": [],
+            "symbol_changes": [],
+        }
+        receipt_lines = [
+            json.dumps({"type": "thread.started", "thread_id": "thread-compact"}),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "command": "pytest",
+                        "aggregated_output": long_output,
+                        "exit_code": 0,
+                        "status": "completed",
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "agent_message",
+                        "text": json.dumps(receipt_obj),
+                    },
+                }
+            ),
+        ]
+        plain_lines = [
+            json.dumps({"type": "thread.started", "thread_id": "thread-plain"}),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "agent_message",
+                        "text": "Plain text scout report without JSON receipt.",
+                    },
+                }
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            receipt_log = Path(td) / "receipt.jsonl"
+            receipt_log.write_text("\n".join(receipt_lines) + "\n", encoding="utf-8")
+
+            compact_proc = _run_drive(
+                ["audit", "--worker", "codex", "--log", str(receipt_log), "--mode", "ship"]
+            )
+            self.assertEqual(compact_proc.returncode, drive.EXIT_OK)
+            compact = json.loads(compact_proc.stdout)
+            self.assertTrue(compact["receipt_valid"])
+            self.assertIsNone(compact["final_message"])
+            self.assertEqual(len(compact["commands"][0]["output_preview"]), 160)
+            self.assertTrue(compact["commands"][0]["output_preview"].endswith("..."))
+
+            full_proc = _run_drive(
+                [
+                    "audit",
+                    "--worker",
+                    "codex",
+                    "--log",
+                    str(receipt_log),
+                    "--mode",
+                    "ship",
+                    "--full-output",
+                ]
+            )
+            self.assertEqual(full_proc.returncode, drive.EXIT_OK)
+            full = json.loads(full_proc.stdout)
+            self.assertTrue(full["receipt_valid"])
+            self.assertEqual(full["final_message"], json.dumps(receipt_obj))
+            self.assertEqual(len(full["commands"][0]["output_preview"]), 300)
+
+            plain_log = Path(td) / "plain.jsonl"
+            plain_log.write_text("\n".join(plain_lines) + "\n", encoding="utf-8")
+            plain_proc = _run_drive(
+                ["audit", "--worker", "codex", "--log", str(plain_log), "--mode", "scout"]
+            )
+            self.assertEqual(plain_proc.returncode, drive.EXIT_OK)
+            plain = json.loads(plain_proc.stdout)
+            self.assertIsNone(plain["receipt_valid"])
+            self.assertEqual(
+                plain["final_message"], "Plain text scout report without JSON receipt."
+            )
 
 
 class DshAdapterTests(unittest.TestCase):
@@ -822,6 +912,144 @@ class WorktreeAndLockTests(unittest.TestCase):
             self.assertEqual(_git(wt_path, "status", "--porcelain"), "")
             drive.remove_worktree(repo_wt, wt_path, force=True, delete_branch=True)
 
+    def test_worktree_create_combined_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = _init_temp_repo(root)
+
+            missing_worker = _run_drive(
+                [
+                    "worktree",
+                    "create",
+                    "--repo",
+                    str(repo),
+                    "--task",
+                    "pf-missing-worker",
+                    "--preflight",
+                ]
+            )
+            self.assertEqual(missing_worker.returncode, drive.EXIT_INVALID_ARGS)
+            self.assertEqual(json.loads(missing_worker.stdout)["error"], "invalid_arguments")
+
+            empty_home = root / "empty-home"
+            empty_home.mkdir()
+            git_dir = str(Path(drive.shutil.which("git") or "/usr/bin/git").parent)
+            fail_env = {"PATH": git_dir, "HOME": str(empty_home)}
+            failed = _run_drive(
+                [
+                    "worktree",
+                    "create",
+                    "--repo",
+                    str(repo),
+                    "--task",
+                    "pf-fail",
+                    "--preflight",
+                    "--worker",
+                    "codex",
+                ],
+                env=fail_env,
+            )
+            self.assertEqual(failed.returncode, drive.EXIT_ERROR)
+            fail_payload = json.loads(failed.stdout)
+            self.assertFalse(fail_payload["ok"])
+            self.assertEqual(fail_payload["error"], "preflight_failed")
+            self.assertFalse(fail_payload["preflight"]["ok"])
+            self.assertFalse((root / ".worktrees" / repo.name / "pf-fail").exists())
+            self.assertEqual(_git(repo, "branch", "--list", "codex-use/pf-fail"), "")
+
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            fake_codex = fake_bin / "codex"
+            fake_codex.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = \"--version\" ]; then echo 'codex-cli 0.171.0'; exit 0; fi\n"
+                "if [ \"$1\" = \"login\" ]; then echo 'Logged in using ChatGPT'; exit 0; fi\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(fake_codex.stat().st_mode | stat.S_IXUSR)
+            pass_env = {"PATH": f"{fake_bin}:{git_dir}", "HOME": str(empty_home)}
+            passed = _run_drive(
+                [
+                    "worktree",
+                    "create",
+                    "--repo",
+                    str(repo),
+                    "--task",
+                    "pf-pass",
+                    "--preflight",
+                    "--worker",
+                    "codex",
+                ],
+                env=pass_env,
+            )
+            self.assertEqual(passed.returncode, drive.EXIT_OK, passed.stdout + passed.stderr)
+            pass_payload = json.loads(passed.stdout)
+            self.assertTrue(pass_payload["ok"])
+            self.assertTrue(pass_payload["preflight"]["ok"])
+            wt_path = Path(pass_payload["worktree"])
+            self.assertTrue(wt_path.is_dir())
+            drive.remove_worktree(repo, wt_path, delete_branch=True)
+
+    def test_worktree_remove_cleans_safe_caches_and_fails_closed_on_stray_file(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = _init_temp_repo(root)
+
+            created = drive.create_worktree(repo, "cache-clean")
+            wt_path = Path(created["worktree"])
+            (wt_path / ".codex-use").mkdir(parents=True, exist_ok=True)
+            (wt_path / ".codex-use" / "slice.md").write_text("brief", encoding="utf-8")
+            (wt_path / "src" / "__pycache__").mkdir(parents=True, exist_ok=True)
+            (wt_path / "src" / "__pycache__" / "mod.cpython-312.pyc").write_bytes(b"pyc")
+            (wt_path / ".pytest_cache" / "v").mkdir(parents=True, exist_ok=True)
+            (wt_path / ".pytest_cache" / "v" / "stepwise").write_text("[]", encoding="utf-8")
+            (wt_path / ".DS_Store").write_bytes(b"mac")
+
+            remove_proc = _run_drive(
+                [
+                    "worktree",
+                    "remove",
+                    "--repo",
+                    str(repo),
+                    "--worktree",
+                    str(wt_path),
+                    "--delete-branch",
+                ]
+            )
+            self.assertEqual(remove_proc.returncode, drive.EXIT_OK, remove_proc.stdout + remove_proc.stderr)
+            removed = json.loads(remove_proc.stdout)
+            self.assertTrue(removed["ok"])
+            self.assertTrue(removed["branch_deleted"])
+            self.assertTrue(removed["cleaned_caches"])
+            self.assertFalse(wt_path.exists())
+            self.assertFalse((root / ".worktrees" / repo.name).exists())
+            self.assertFalse((root / ".worktrees").exists())
+
+            created_dirty = drive.create_worktree(repo, "stray-guard")
+            wt_dirty = Path(created_dirty["worktree"])
+            cache_file = wt_dirty / "src" / "__pycache__" / "a.pyc"
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            cache_file.write_bytes(b"pyc")
+            stray_file = wt_dirty / "stray.py"
+            stray_file.write_text("print('keep me')\n", encoding="utf-8")
+
+            blocked_proc = _run_drive(
+                [
+                    "worktree",
+                    "remove",
+                    "--repo",
+                    str(repo),
+                    "--worktree",
+                    str(wt_dirty),
+                ]
+            )
+            self.assertEqual(blocked_proc.returncode, drive.EXIT_ERROR)
+            self.assertTrue(stray_file.is_file())
+            self.assertTrue(cache_file.is_file())
+
+            drive.remove_worktree(repo, wt_dirty, force=True, delete_branch=True)
+
 
 class RepositoryContractTests(unittest.TestCase):
     def test_manifests_and_schema_are_valid(self) -> None:
@@ -886,6 +1114,20 @@ class RepositoryContractTests(unittest.TestCase):
             self.assertIn(f"templates/{template_name}", skill_md)
             self.assertTrue((SKILL_ROOT / "templates" / template_name).is_file())
         self.assertIn("2 `drive.py resume` rounds", skill_md)
+        self.assertIn("read_file", skill_md)
+
+        cold_start_files = [
+            SKILL_ROOT / "SKILL.md",
+            SKILL_ROOT / "workers" / "codex.md",
+            SKILL_ROOT / "hosts" / "antigravity.md",
+            SKILL_ROOT / "templates" / "bugfix-task.md",
+        ]
+        cold_start_bytes = sum(path.stat().st_size for path in cold_start_files)
+        self.assertLessEqual(
+            cold_start_bytes,
+            11500,
+            f"Cold-start skill bundle grew to {cold_start_bytes} bytes (budget <= 11500)",
+        )
 
         link_pattern = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
         for md_file in sorted(SKILL_ROOT.rglob("*.md")):
