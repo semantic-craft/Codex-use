@@ -5,10 +5,12 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SKILL_ROOT = REPO_ROOT / "skills" / "codex-use"
@@ -223,6 +225,114 @@ class CodexAdapterTests(unittest.TestCase):
                     worker="codex", cwd=Path("/tmp"), base="main", uncommitted=True
                 )
             )
+
+    def test_image_passthrough_and_missing_image_validation(self) -> None:
+        img_a = Path("/tmp/mock-a.png")
+        img_b = Path("/tmp/mock-b.png")
+        run_cmd = self.adapter.build_run_cmd(
+            drive.RunRequest(
+                worker="codex",
+                mode="ship",
+                cwd=Path("/tmp/wt"),
+                effort="high",
+                images=(img_a, img_b),
+            )
+        )
+        self.assertEqual(
+            run_cmd[-5:],
+            ["--image", str(img_a), "--image", str(img_b), "-"],
+        )
+
+        resume_cmd = self.adapter.build_resume_cmd(
+            drive.ResumeRequest(
+                worker="codex",
+                session_id="thread-img",
+                mode="ship",
+                cwd=Path("/tmp/wt"),
+                images=(img_a,),
+            )
+        )
+        self.assertEqual(resume_cmd[-3:], ["--image", str(img_a), "-"])
+
+        with tempfile.TemporaryDirectory() as td:
+            missing_img = Path(td) / "does-not-exist.png"
+            proc = _run_drive(
+                [
+                    "run",
+                    "--worker",
+                    "codex",
+                    "--mode",
+                    "scout",
+                    "--cwd",
+                    td,
+                    "--image",
+                    str(missing_img),
+                    "--prompt",
+                    "check screenshot",
+                ]
+            )
+            self.assertEqual(proc.returncode, drive.EXIT_INVALID_ARGS)
+            payload = json.loads(proc.stdout)
+            self.assertEqual(payload["error"], "invalid_arguments")
+            self.assertIn("does not exist", payload["message"].lower())
+
+    def test_standalone_codex_binary_fallback_when_not_on_path(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = _init_temp_repo(root)
+            fake_home = root / "home"
+            standalone = (
+                fake_home
+                / ".codex"
+                / "packages"
+                / "standalone"
+                / "current"
+                / "bin"
+                / "codex"
+            )
+            standalone.parent.mkdir(parents=True, exist_ok=True)
+            standalone.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = \"--version\" ]; then echo 'codex-cli 0.171.0'; exit 0; fi\n"
+                "if [ \"$1\" = \"login\" ]; then echo 'Logged in via standalone'; exit 0; fi\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            standalone.chmod(standalone.stat().st_mode | stat.S_IXUSR)
+
+            with mock.patch.object(drive.shutil, "which", return_value=None), mock.patch.object(
+                drive.Path, "home", return_value=fake_home
+            ):
+                resolved, source = drive._resolve_codex_binary()
+                self.assertEqual(resolved, str(standalone))
+                self.assertEqual(source, "standalone")
+
+                preflight = self.adapter.preflight(repo)
+                self.assertTrue(preflight.ok, preflight.issues)
+                self.assertEqual(preflight.binary_path, str(standalone))
+                self.assertEqual(preflight.version, "codex-cli 0.171.0")
+
+                run_cmd = self.adapter.build_run_cmd(
+                    drive.RunRequest(worker="codex", mode="scout", cwd=repo)
+                )
+                resume_cmd = self.adapter.build_resume_cmd(
+                    drive.ResumeRequest(
+                        worker="codex", session_id="t-1", mode="ship", cwd=repo
+                    )
+                )
+                review_cmd = self.adapter.build_review_cmd(
+                    drive.ReviewRequest(worker="codex", cwd=repo)
+                )
+                self.assertEqual(run_cmd[0], str(standalone))
+                self.assertEqual(resume_cmd[0], str(standalone))
+                assert review_cmd is not None
+                self.assertEqual(review_cmd[0], str(standalone))
+
+            with mock.patch.object(drive.shutil, "which", return_value="/usr/local/bin/codex"):
+                run_cmd_path = self.adapter.build_run_cmd(
+                    drive.RunRequest(worker="codex", mode="scout", cwd=repo)
+                )
+                self.assertEqual(run_cmd_path[0], "codex")
 
     def test_parse_codex_jsonl_fixture_and_audit_subcommand(self) -> None:
         receipt_obj = {
@@ -471,6 +581,48 @@ class DshAdapterTests(unittest.TestCase):
             self.assertEqual(payload["error"], "unsupported_review")
             self.assertIn("--worker codex", payload["message"])
 
+    def test_dsh_rejects_image_attachments_explicitly(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            img = Path(td) / "screen.png"
+            img.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+            with self.assertRaises(drive.ValidationError):
+                self.adapter.build_run_cmd(
+                    drive.RunRequest(
+                        worker="dsh", mode="scout", cwd=Path(td), images=(img,)
+                    )
+                )
+            with self.assertRaises(drive.ValidationError):
+                self.adapter.build_resume_cmd(
+                    drive.ResumeRequest(
+                        worker="dsh",
+                        session_id="session-1",
+                        mode="ship",
+                        cwd=Path(td),
+                        images=(img,),
+                    )
+                )
+
+            proc = _run_drive(
+                [
+                    "run",
+                    "--worker",
+                    "dsh",
+                    "--mode",
+                    "scout",
+                    "--cwd",
+                    td,
+                    "--image",
+                    str(img),
+                    "--prompt",
+                    "inspect screenshot",
+                ]
+            )
+            self.assertEqual(proc.returncode, drive.EXIT_INVALID_ARGS)
+            payload = json.loads(proc.stdout)
+            self.assertEqual(payload["error"], "invalid_arguments")
+            self.assertIn("--image", payload["message"])
+
     def test_parse_dsh_ndjson_fixtures(self) -> None:
         missing_cred_fixture = [
             json.dumps({"type": "session", "sessionId": "session-1763900000-01"}),
@@ -632,6 +784,44 @@ class WorktreeAndLockTests(unittest.TestCase):
             self.assertTrue(removed["branch_deleted"])
             self.assertFalse(wt_path.exists())
 
+    def test_idempotent_local_git_exclude_for_codex_use_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = _init_temp_repo(root)
+            exclude_file = repo / ".git" / "info" / "exclude"
+            gitignore_file = repo / ".gitignore"
+
+            external_prompt = root / "external-prompt.md"
+            external_prompt.write_text("external prompt", encoding="utf-8")
+            self.assertFalse(drive._maybe_exclude_local_prompt_dir(repo, str(external_prompt)))
+            self.assertNotIn(".codex-use/", exclude_file.read_text(encoding="utf-8"))
+
+            local_prompt = repo / ".codex-use" / "task.md"
+            local_prompt.parent.mkdir(parents=True, exist_ok=True)
+            local_prompt.write_text("local spec", encoding="utf-8")
+            self.assertTrue(drive._maybe_exclude_local_prompt_dir(repo, str(local_prompt)))
+            self.assertFalse(drive.ensure_local_git_exclude(repo))
+            self.assertFalse(drive._maybe_exclude_local_prompt_dir(repo, str(local_prompt)))
+            exclude_lines = [
+                line.strip()
+                for line in exclude_file.read_text(encoding="utf-8").splitlines()
+                if line.strip() == ".codex-use/"
+            ]
+            self.assertEqual(len(exclude_lines), 1)
+            self.assertFalse(gitignore_file.exists())
+            self.assertEqual(_git(repo, "status", "--porcelain"), "")
+
+            wt_parent = root / "wt-parent"
+            wt_parent.mkdir()
+            repo_wt = _init_temp_repo(wt_parent)
+            created = drive.create_worktree(repo_wt, "exclude-check")
+            wt_path = Path(created["worktree"])
+            wt_spec = wt_path / ".codex-use" / "slice.md"
+            wt_spec.parent.mkdir(parents=True, exist_ok=True)
+            wt_spec.write_text("worktree spec", encoding="utf-8")
+            self.assertEqual(_git(wt_path, "status", "--porcelain"), "")
+            drive.remove_worktree(repo_wt, wt_path, force=True, delete_branch=True)
+
 
 class RepositoryContractTests(unittest.TestCase):
     def test_manifests_and_schema_are_valid(self) -> None:
@@ -691,6 +881,11 @@ class RepositoryContractTests(unittest.TestCase):
         fm = fm_match.group(1)
         self.assertRegex(fm, r"(?m)^name:\s*codex-use\s*$", "SKILL.md name must be codex-use")
         self.assertRegex(fm, r"(?m)^description:\s*.+$", "SKILL.md must include description")
+
+        for template_name in ("scout-task.md", "ship-task.md", "bugfix-task.md"):
+            self.assertIn(f"templates/{template_name}", skill_md)
+            self.assertTrue((SKILL_ROOT / "templates" / template_name).is_file())
+        self.assertIn("2 `drive.py resume` rounds", skill_md)
 
         link_pattern = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
         for md_file in sorted(SKILL_ROOT.rglob("*.md")):
