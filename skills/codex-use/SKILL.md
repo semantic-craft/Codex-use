@@ -5,115 +5,59 @@ description: Drive headless coding workers (Codex CLI and DeepSeek Harness) from
 
 # codex-use
 
-Use this skill when a host agent delegates bounded reconnaissance, implementation, or diff review slices to a local headless coding worker (`codex` or `dsh`) via [`scripts/drive.py`](scripts/drive.py).
+Delegate bounded `scout`, `ship`, or `review` slices to local headless CLIs (`codex`, `dsh`) via [`scripts/drive.py`](scripts/drive.py).
 
-## 1. Host and Worker Boundaries
+## 1. CLI Quick Reference (Black-Box Rule)
 
-The architecture splits responsibilities across two axes.
+Invoke [`scripts/drive.py`](scripts/drive.py) strictly as a black-box CLI. Never open `scripts/drive.py` source with `read_file`; run `python3 .../drive.py <subcmd> --help` if needed.
 
-- **Host agent.** Owns scope, architecture, worktree creation, independent verification, diff auditing, and all communication with the user.
-- **Headless worker.** Executes one read-only `scout` slice, one isolated `ship` slice, or one `review` pass through its official CLI.
-- **Parallel isolation invariant.** Never launch two concurrent `ship` runs against the same worktree or overlapping file sets. Every concurrent write slice gets its own linked git worktree. `scripts/drive.py` enforces a non-blocking exclusive lock per worktree (`exit code 3` on collision).
-- **Self-contained user reporting.** Rewrite every milestone report and final answer as if the user is seeing the result for the first time. Do not dump raw JSONL, internal agent shorthand, or dangling continuations of collapsed progress updates.
+| Subcommand | Canonical flags | Behavior |
+| --- | --- | --- |
+| `preflight` | `--worker <codex\|dsh> --cwd <repo>` | Standalone check (`scout`). |
+| `worktree create` | `--repo <r> --task <slug> --preflight --worker <w> [--base <ref>]` | Preflights first, creates linked worktree + `base_sha`, auto-excludes `.codex-use/`. |
+| `run` | `--worker <w> --mode <scout\|ship> --cwd <d> --prompt-file <f> [--effort medium\|high\|xhigh] [--schema <s>] [--image <p>...] [--base <sha>] [--full-output]` | Returns compact `AuditSummary` (160-char previews; omits duplicate `final_message` when `receipt_valid` is true; full log at `raw_log`). |
+| `resume` | `--session <id>` + same flags as `run` | Continues same thread under exclusive `ship` lock. |
+| `review` | `--worker codex --cwd <d> [--base <br> \| --uncommitted \| --commit <sha>] [--prompt-file <f>] [--full-output]` | Non-interactive diff review (`dsh` exits `1`). |
+| `audit` | `--worker <w> --log <jsonl> [--cwd <d>] [--base <sha>] [--full-output]` | Re-parses JSONL into `AuditSummary`. |
+| `worktree remove` | `--repo <r> --worktree <wt> [--delete-branch] [--force]` | Auto-cleans safe caches (`.codex-use`, `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.DS_Store`) and prunes empty `.worktrees` dirs; fails closed on real untracked/modified files. |
 
-Load only the profile files matching your active environment.
+## 2. Boundaries and Profiles
 
-- Workers: [`workers/codex.md`](workers/codex.md) or [`workers/dsh.md`](workers/dsh.md).
-- Hosts: [`hosts/antigravity.md`](hosts/antigravity.md), [`hosts/grok-bot.md`](hosts/grok-bot.md), or [`hosts/dsh.md`](hosts/dsh.md).
-- Task templates: [`templates/scout-task.md`](templates/scout-task.md), [`templates/ship-task.md`](templates/ship-task.md), and [`templates/bugfix-task.md`](templates/bugfix-task.md).
-- Completion receipt contract: [`schemas/receipt.schema.json`](schemas/receipt.schema.json).
+- **Host:** owns scope, architecture, worktree setup, diff audit, independent verification, and user replies (rewritten for a first-time reader; zero internal shorthand or raw JSONL).
+- **Worker:** owns one headless slice. Never run concurrent `ship` slices in the same worktree or on overlapping files (`flock` exits `3` on collision).
+- Load only matching profiles:
+  - Workers: [`workers/codex.md`](workers/codex.md), [`workers/dsh.md`](workers/dsh.md)
+  - Hosts: [`hosts/antigravity.md`](hosts/antigravity.md), [`hosts/grok-bot.md`](hosts/grok-bot.md), [`hosts/dsh.md`](hosts/dsh.md)
+  - Templates: [`templates/scout-task.md`](templates/scout-task.md), [`templates/ship-task.md`](templates/ship-task.md), [`templates/bugfix-task.md`](templates/bugfix-task.md)
+  - Schema: [`schemas/receipt.schema.json`](schemas/receipt.schema.json)
 
-## 2. Operating Modes
+## 3. Modes
 
-Classify every delegation as `scout`, `ship`, or `review` before spawning a worker.
+- **`scout`:** read-only tracing/repro/planning; no worktree, edits, push, or PR; exhaustive single-turn check with reversible assumptions logged; promote approved findings straight into `ship`.
+- **`ship`:** isolated writes following Section 4.
+- **`review`:** `drive.py review --worker codex` or blind-context host diff review.
 
-### `scout` (read-only reconnaissance)
+## 4. Three-Phase `ship` Gate
 
-Use `scout` for investigation, root-cause tracing, reproduction, or change planning.
+**Phase 1 (Host setup).** Lock goal, non-goals, core types/interfaces, and one canonical verification command. Run `worktree create --repo <repo> --task <slug> --preflight --worker <w>` and record `worktree` and `base_sha`.
 
-- No isolated worktree is required.
-- The worker runs in `read-only` mode and must not edit repository files, push branches, or open pull requests.
-- Require exhaustive single-turn coverage of the named files and checks. When minor details are unspecified, the worker makes reversible assumptions, states them explicitly, and finishes the investigation instead of pausing mid-way.
-- After auditing the worker output, present a self-contained summary to the user. Once approved, carry the `scout` findings directly into `ship` without repeating discovery.
+**Phase 2 (Worker execution).** Write the brief from [`templates/ship-task.md`](templates/ship-task.md) or [`templates/bugfix-task.md`](templates/bugfix-task.md) into `<worktree>/.codex-use/<task>.md` (auto-excluded in `<git_common_dir>/info/exclude`, never touching `.gitignore`) and call `drive.py run` with `--schema skills/codex-use/schemas/receipt.schema.json`. Every `ship` prompt includes five blocks (`scout` omits write authorization):
 
-### `ship` (isolated implementation)
+1. **Finish-the-slice contract:** isolated worktree + baseline commit; complete all authorized steps in one turn using reversible assumptions instead of stopping at "suggested next steps"; no extra worktrees, pushes, PRs, or irreversible external actions.
+2. **Ban list:** no unrequested abstractions, compatibility shims, defensive error swallowing, narrating comments, or code-golfing (abbreviated identifiers or dense one-liners faking brevity).
+3. **Budget and verification:** quantitative file/line scope budget (not readability compression), review rubric, and one canonical verification command.
+4. **Resource etiquette:** bound build/test concurrency, avoid focus stealing, clean up background processes and temp files.
+5. **Receipt:** self-contained JSON matching [`schemas/receipt.schema.json`](schemas/receipt.schema.json).
 
-Use `ship` for authorized code changes, bug fixes, and refactors. Follow the three-phase gate in Section 3 strictly.
+**Phase 3 (Host audit and triage).** Never trust worker prose alone. Run all three checks:
 
-### `review` (non-interactive diff audit)
+1. **Log audit:** verify `AuditSummary.commands` exit codes, `errors`, and `receipt_valid` (`--full-output` or `raw_log` only when truncated).
+2. **Diff audit:** inspect `git -C <wt> diff <base_sha>..HEAD` and `git status --short` against the ban list, diff budget, readability, and prose/UI preservation rules.
+3. **Local verification:** run the canonical verification command yourself in the worktree.
 
-Use `review` for an independent pass over uncommitted changes, a commit, or a branch diff (`scripts/drive.py review`). Check your active worker profile for native review support; when unavailable, run a blind-context host diff review.
+Triage findings:
 
-## 3. Three-Phase `ship` Gate
+- **`auto-fix` (same-thread resume, max 2 rounds):** correctness, security, edge cases, failing tests, code-golfing, or over-engineering. Resume with exact `file:line` fixes and re-run all three checks. Cap automatic rework at **2 `drive.py resume` rounds**; if checks still fail after 2 rounds, halt and escalate the blocker, current `git diff`, and verification output to the user.
+- **`ask-user` (escalate and pause):** product behavior, external contracts, irreversible actions, or out-of-scope tradeoffs. Present options, impact, and a recommendation. **User silence or timeout is never consent, rejection, or permission to skip.**
 
-### Phase 1. Host Preparation
-
-Complete all four steps locally before invoking a worker.
-
-1. Lock the goal and explicit non-goals so scope cannot drift.
-2. Define core data shapes, interface boundaries, and one canonical verification command.
-3. Run preflight to confirm binary availability, credentials, and repository state:
-
-```bash
-python3 skills/codex-use/scripts/drive.py preflight --worker codex --cwd /path/to/repo
-```
-
-4. Create an isolated linked git worktree and record the returned `base_sha`:
-
-```bash
-python3 skills/codex-use/scripts/drive.py worktree create --repo /path/to/repo --task <task-slug>
-```
-
-### Phase 2. Worker Execution
-
-Compose a focused prompt file (starting from [`templates/ship-task.md`](templates/ship-task.md) or [`templates/bugfix-task.md`](templates/bugfix-task.md); use [`templates/scout-task.md`](templates/scout-task.md) for `scout`) and dispatch through `scripts/drive.py run`. Store repo-local task briefs under `.codex-use/`; `drive.py` registers `.codex-use/` idempotently in `<git_common_dir>/info/exclude` without editing tracked `.gitignore`. Pass repeatable `--image <path>` flags for UI or visual references on `--worker codex`.
-
-```bash
-python3 skills/codex-use/scripts/drive.py run \
-  --worker codex \
-  --mode ship \
-  --cwd /path/to/worktree \
-  --base <base_sha> \
-  --schema skills/codex-use/schemas/receipt.schema.json \
-  --prompt-file /path/to/worktree/.codex-use/slice-prompt.md
-```
-
-Every `ship` prompt must include five concrete blocks (`scout` omits write authorization):
-
-1. **Finish-the-slice contract.** State that the worker is inside a dedicated git worktree with a clean baseline commit. Authorize direct edits to target files and execution of verification commands. Instruct the worker to keep advancing while authorized next steps remain, make reversible assumptions for minor unspecified details, and never end a turn with "suggested next steps" or routine confirmation requests. Forbid creating extra worktrees, pushing branches, opening PRs, or running irreversible operations outside the worktree.
-2. **Explicit ban list.** Forbid unrequested abstractions, compatibility shims, defensive error swallowing, narrating comments, and code-golfing (shortening identifiers or cramming dense one-liners to fake a smaller diff).
-3. **Review rubric and diff budget.** State a quantitative scope budget (affected files or net lines as a scope guard, not a license to compress readability), the concrete review checks, and the single verification command.
-4. **Resource etiquette.** Cap build/test concurrency on shared workstations, avoid stealing desktop focus during UI tests, and stop any background processes or temp artifacts created during the run.
-5. **Four-item completion receipt.** Require a self-contained final response matching [`schemas/receipt.schema.json`](schemas/receipt.schema.json): `changed_files`, `verification` (commands run with real exit codes), `assumptions_and_risks`, and `symbol_changes`.
-
-### Phase 3. Host Audit and Triage
-
-Never accept worker prose at face value. Complete all three independent checks before merging or reporting success.
-
-1. **Real-command log audit.** Inspect the `AuditSummary` returned by `drive.py` (or re-run `drive.py audit --worker <w> --log <raw_log> --cwd <wt> --base <base_sha>`). Verify that the required commands actually executed with exit code `0` and that `errors` is empty.
-2. **Local diff audit.** Run `git -C <wt> diff <base_sha>..HEAD` (plus `git status --short`). Check every changed file against the ban list, diff budget, and readability rules. When editing existing prose or UI copy, confirm original author wording was preserved and redundant filler labels were removed.
-3. **Independent local verification.** Run the canonical verification command yourself inside the worktree. Rely on your own observed exit code and output.
-
-Route every audit finding into one of two buckets.
-
-- **`auto-fix` (same-thread resume, max 2 automatic rounds).** Pure correctness bugs, security issues, missing edge cases, failing tests, code-golfing, or over-engineering. Send a targeted fix prompt back to the same worker thread with exact `file:line` citations and the verification command, then repeat all three checks. Cap automatic rework at **2 `drive.py resume` rounds**. If checks still fail after 2 rework rounds, halt and escalate the blocker, current `git diff`, and verification output to the user instead of looping indefinitely:
-
-```bash
-python3 skills/codex-use/scripts/drive.py resume \
-  --worker codex \
-  --session <session_id> \
-  --mode ship \
-  --cwd /path/to/worktree \
-  --base <base_sha> \
-  --prompt-file /path/to/worktree/.codex-use/autofix-prompt.md
-```
-
-- **`ask-user` (escalate and pause).** Product behavior choices, external API or schema contract changes, irreversible actions, or tradeoffs outside authorized scope. Present clear options, concrete impact, and a recommendation. **User silence or timeout is never consent, rejection, or permission to skip.** Keep the decision pending until an explicit answer arrives.
-
-For high-risk, security-sensitive, or cross-module changes, run an additional blind-context review before integration. Pass only the task goal, review rubric, and `git diff` without implementation history.
-
-Clean up temporary worktrees after integration:
-
-```bash
-python3 skills/codex-use/scripts/drive.py worktree remove --repo /path/to/repo --worktree /path/to/worktree --delete-branch
-```
+Run a blind-context review (goal, rubric, `git diff` only) for high-risk or cross-module diffs. Clean up via `drive.py worktree remove --repo <repo> --worktree <wt> --delete-branch`.

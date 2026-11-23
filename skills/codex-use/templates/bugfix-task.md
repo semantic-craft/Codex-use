@@ -1,41 +1,23 @@
 # Bugfix Task Brief
 
-## Workspace and Finish-the-Slice Contract
+**Workspace:** isolated git worktree `<worktree-path>` on baseline `<base-sha>`. Direct edits and local verification are authorized.
 
-You are operating inside an isolated git worktree at `<worktree-path>` backed by baseline commit `<base-sha>`. You are authorized to edit target files directly and run verification commands locally.
+**Contract:** reproduce the failure first, trace root cause, apply the minimal fix, and verify in this turn. Make reversible assumptions for minor unspecified details and log them. Never stop at "suggested next steps." Do not create extra worktrees, push, or open PRs.
 
-Reproduce the failure first, trace the root cause, apply the minimal fix, and verify the fix passes before finishing. Make reversible assumptions for minor unspecified details and record them in the receipt. Never stop early at "suggested next steps." Do not create extra worktrees, push branches, or open pull requests.
+## Bug and Entry Points
 
-## Symptom and Reproduction
+- **Observed failure:** `<exact error or wrong behavior>`
+- **Expected behavior:** `<exact contract>`
+- **Repro command:** `<command that fails before fix>`
+- **Entry points:** `<path/to/module.py>:<line>`, `<path/to/test_module.py>`
 
-- **Observed failure:** `<exact error message, wrong output, or failing behavior>`
-- **Expected behavior:** `<exact contract behavior>`
-- **Reproduction command:** `<command that currently fails before the fix>`
+## Ban List and Verification
 
-## Suspected Entry Points
+- Fix root cause only; no error swallowing, silent fallbacks, unrequested abstractions, compatibility shims, narrating comments, or code-golfing. Leave unrelated files untouched.
+- **Budget:** <= `<N>` files, ~`<M>` net lines.
+- **Regression test:** one focused test failing before fix and passing after.
+- **Verify command:** `<single test command>` (bound concurrency; clean up spawned processes/temp files).
 
-- `<path/to/module.py>:<line>`
-- `<path/to/test_module.py>`
+## Receipt (`schemas/receipt.schema.json`)
 
-## Explicit Ban List
-
-- Fix the root cause; do not paper over symptoms with defensive catches or silent fallbacks.
-- No unrequested abstractions, compatibility shims, narrating comments, or code-golfing.
-- Keep unrelated files and surrounding formatting untouched.
-
-## Scope Budget and Verification
-
-- **Diff budget:** at most `<N>` files and ~`<M>` net lines.
-- **Regression test:** add or extend one focused test that fails without the fix and passes with it.
-- **Canonical verification command:** `<single command covering the regression test and existing suite>`
-- **Resource etiquette:** bound build/test concurrency and clean up any background processes or temp files created during reproduction.
-
-## Completion Receipt
-
-Return a self-contained final response matching `schemas/receipt.schema.json`:
-
-- `summary`: root cause and verified fix written for a first-time reader.
-- `changed_files`: repository-relative paths modified.
-- `verification`: reproduction command (before/after) and canonical verification command with real exit codes.
-- `assumptions_and_risks`: reversible assumptions made and any remaining edge cases.
-- `symbol_changes`: symbols added, modified, or removed.
+Return self-contained JSON: `summary`, `changed_files`, `verification` (repro before/after + verify command with real exit codes), `assumptions_and_risks`, `symbol_changes`.

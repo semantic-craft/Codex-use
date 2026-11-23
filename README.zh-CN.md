@@ -29,7 +29,7 @@ Codex-use 将这些规则直接编码进 `scripts/drive.py` 的结构与边界�
 
 - **自包含技能目录。** 运行所需的协议文档、Worker/宿主配置、`templates/` 任务模板、Schema 与脚本全部集中在 `skills/codex-use/` 内部，单独复制或软链接该目录即可完整工作。
 - **零第三方依赖。** `scripts/drive.py` 仅使用 Python 3.10+ 标准库；当 `PATH` 中未安装 `codex` 时，自动回退检测 Codex Desktop 自带的独立二进制（`~/.codex/packages/standalone/current/bin/codex`）。
-- **本地任务单自动排除与有界返工。** 放在仓库 `.codex-use/` 下的任务单会自动幂等写入 `<git_common_dir>/info/exclude`（不污染受跟踪的 `.gitignore`）；`auto-fix` 同会话自修上限为 2 轮，超限即停机升级人工裁决。
+- **本地任务单自动排除、紧凑回执与有界返工。** 放在仓库 `.codex-use/` 下的任务单自动幂等写入 `<git_common_dir>/info/exclude`（不改 `.gitignore`）；`AuditSummary` 默认紧凑输出（命令预览截断至 160 字符，且 `receipt_valid` 为真时省略重复的 `final_message`，按需传 `--full-output` 恢复完整预览）；`worktree remove` 自动清理安全缓存目录（`.codex-use`、`__pycache__`、`.pytest_cache`、`.mypy_cache`、`.ruff_cache`、`.DS_Store`）并对真实未跟踪或已改动文件保持失败保护；`auto-fix` 同会话自修上限 2 轮。
 
 ## 安装方式
 
@@ -85,10 +85,11 @@ python3 skills/codex-use/scripts/drive.py run \
 
 ### 3. 隔离实现（`ship`）
 
-可基于 `skills/codex-use/templates/ship-task.md` 或 `bugfix-task.md`（只读侦察用 `scout-task.md`）撰写任务单，创建独立 linked worktree，带互斥写锁执行实现切片（`--worker codex` 支持重复传入 `--image <path>` 附加视觉参考图），并通过 stdout 返回结构化 `AuditSummary`：
+可基于 `skills/codex-use/templates/ship-task.md` 或 `bugfix-task.md`（只读侦察用 `scout-task.md`）撰写任务单，通过 `--preflight --worker <w>` 一步完成预检与独立 linked worktree 创建，带互斥写锁执行实现切片（`--worker codex` 支持重复传入 `--image <path>`），并通过 stdout 返回紧凑 `AuditSummary`（按需加 `--full-output` 输出完整预览与原始 `final_message`）：
 
 ```bash
-python3 skills/codex-use/scripts/drive.py worktree create --repo /path/to/repo --task fix-retry
+python3 skills/codex-use/scripts/drive.py worktree create \
+  --repo /path/to/repo --task fix-retry --preflight --worker codex
 
 python3 skills/codex-use/scripts/drive.py run \
   --worker codex \

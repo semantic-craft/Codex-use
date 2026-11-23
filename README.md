@@ -29,7 +29,7 @@ Host (Antigravity / Grok Bot / DSH / any SKILL.md agent)
 
 - **Self-contained skill folder.** Everything needed at runtime lives inside `skills/codex-use/` (protocol, worker/host profiles, task templates under `templates/`, receipt schema, and `scripts/drive.py`). Copying or symlinking that directory alone preserves all relative links and scripts.
 - **Zero third-party dependencies.** `scripts/drive.py` uses Python 3.10+ standard library modules only, and falls back to Codex Desktop's standalone binary (`~/.codex/packages/standalone/current/bin/codex`) when `codex` is not on `PATH`.
-- **Clean local specs and bounded retries.** Task specs placed under `.codex-use/` are automatically excluded in `<git_common_dir>/info/exclude` (never modifying `.gitignore`), and automatic `auto-fix` resumes are capped at 2 rounds before escalating to the user.
+- **Clean local specs, compact audits, and bounded retries.** Task specs under `.codex-use/` are auto-excluded in `<git_common_dir>/info/exclude` (never modifying `.gitignore`). `AuditSummary` stdout defaults to compact mode (160-char previews, omitting duplicate `final_message` when `receipt_valid` is true; pass `--full-output` for verbose previews and raw `final_message`). `worktree remove` auto-cleans safe disposable caches (`.codex-use`, `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.DS_Store`) while failing closed on real untracked or modified files. Automatic `auto-fix` resumes cap at 2 rounds before escalating to the user.
 
 ## Installation
 
@@ -85,10 +85,11 @@ python3 skills/codex-use/scripts/drive.py run \
 
 ### 3. Isolated `ship`
 
-Start from `skills/codex-use/templates/ship-task.md` or `skills/codex-use/templates/bugfix-task.md` (use `templates/scout-task.md` for `scout`), create a linked worktree, run a scoped change with exclusive lock protection (optionally passing repeatable `--image <path>` flags on `--worker codex`), and inspect the structured `AuditSummary` returned on stdout:
+Start from `skills/codex-use/templates/ship-task.md` or `skills/codex-use/templates/bugfix-task.md` (use `templates/scout-task.md` for `scout`), combine preflight and linked worktree creation in one command, run a scoped change with exclusive lock protection (optionally passing repeatable `--image <path>` flags on `--worker codex`), and inspect the compact `AuditSummary` returned on stdout (add `--full-output` if you want 400-char previews and unelided `final_message`):
 
 ```bash
-python3 skills/codex-use/scripts/drive.py worktree create --repo /path/to/repo --task fix-retry
+python3 skills/codex-use/scripts/drive.py worktree create \
+  --repo /path/to/repo --task fix-retry --preflight --worker codex
 
 python3 skills/codex-use/scripts/drive.py run \
   --worker codex \

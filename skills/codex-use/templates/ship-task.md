@@ -1,44 +1,24 @@
 # Ship Task Brief
 
-## Workspace and Finish-the-Slice Contract
+## Workspace and Contract
 
-You are operating inside an isolated git worktree at `<worktree-path>` backed by baseline commit `<base-sha>`. You are authorized to edit target files directly and run verification commands locally.
+Isolated git worktree `<worktree-path>` on baseline commit `<base-sha>`. Direct edits and local verification are authorized.
 
-Keep advancing while authorized next steps remain. When minor details are unspecified, make a reversible assumption, record it in the receipt, and finish the slice in this turn. Never end the turn with "suggested next steps" or routine confirmation requests. Do not create extra worktrees, push branches, open pull requests, or perform irreversible actions outside this worktree.
+Finish all authorized steps in this turn. Make reversible assumptions for minor unspecified details and log them in the receipt. Never stop early at "suggested next steps." Do not create extra worktrees, push branches, or open PRs.
 
-## Objective
+## Objective, Non-Goals, and Reuse
 
-<State the concrete change to implement or refactor.>
+- **Objective:** `<concrete change to implement or refactor>`
+- **Non-goals:** `<out-of-scope behavior/files to leave untouched>`
+- **Targets and reuse:** `<path/to/file.py>` (reuse `<existing_symbol>`), `<path/to/test_file.py>` (regression coverage only where requested or needed)
 
-## Explicit Non-Goals
+## Ban List and Verification
 
-- <Anything out of scope that must stay untouched.>
+- No unrequested abstractions, compatibility shims, defensive error swallowing, narrating comments, or code-golfing.
+- **Diff budget (scope guard, not readability compression):** <= `<N>` files, ~`<M>` net lines.
+- **Canonical verify command:** `<single verification command>`
+- **Resource etiquette:** bound build/test concurrency, avoid stealing desktop focus, and clean up spawned processes or temp files.
 
-## Target Files and Existing Symbols to Reuse
+## Receipt (`schemas/receipt.schema.json`)
 
-- `<path/to/file.py>`: reuse `<existing_class_or_helper>`
-- `<path/to/test_file.py>`: add regression coverage only for the new behavior or bug gap
-
-## Explicit Ban List
-
-- No unrequested abstractions, wrapper classes, or speculative extensibility layers.
-- No compatibility shims or dead fallback paths.
-- No defensive error swallowing or empty catch blocks.
-- No narrating comments that restate what code does.
-- No code-golfing (shortened identifiers or dense one-liners) to fake a smaller diff.
-
-## Scope Budget and Verification
-
-- **Diff budget (scope guard, not readability compression):** at most `<N>` files and ~`<M>` net lines.
-- **Canonical verification command:** `<single command, e.g., python3 -m unittest discover -s tests -v>`
-- **Resource etiquette:** keep test/build parallelism bounded, do not steal desktop focus, and stop any background processes or temporary files created during this run.
-
-## Completion Receipt
-
-Write a self-contained final response for a reader seeing the outcome for the first time, matching `schemas/receipt.schema.json`:
-
-- `summary`: plain-language outcome without internal shorthand or dangling references.
-- `changed_files`: repository-relative paths created, modified, or deleted.
-- `verification`: commands actually executed with real exit codes and outcome notes.
-- `assumptions_and_risks`: reversible assumptions made plus remaining risks or uncovered boundaries.
-- `symbol_changes`: key symbols added, modified, or removed.
+Return self-contained JSON: `summary` (plain-language outcome for a first-time reader), `changed_files`, `verification` (commands actually run with real exit codes), `assumptions_and_risks`, and `symbol_changes`.

@@ -1,41 +1,32 @@
 # Worker Profile: Codex CLI (`--worker codex`)
 
-Read this profile when running `scripts/drive.py` with `--worker codex`. Keep Codex-specific prompting rules here so they never leak into other worker adapters.
+Load for `--worker codex`. Keep Codex-specific rules isolated here.
 
-## 1. CLI Contract (Measured on `codex-cli 0.171.0`)
+## 1. CLI Contract (`codex-cli 0.171.0`)
 
-`scripts/drive.py` constructs exact official CLI commands and parses JSONL events into a unified `AuditSummary`.
+- `scout`: `codex exec -s read-only -C <cwd> -c model_reasoning_effort="<effort>" --json [--image <p>...] -`
+- `ship`: `codex exec -s workspace-write -C <cwd> -c model_reasoning_effort="<effort>" --json [--output-schema <s>] [--image <p>...] -`
+- `resume`: `codex exec resume <id> --json [-c model_reasoning_effort="<effort>"] [--image <p>...] -` (never passes `-s`/`-C`; uses subprocess `cwd`)
+- `review`: `codex exec review --json [--base <br> | --uncommitted | --commit <sha>] [-]`
+- **Desktop standalone fallback:** checks `PATH` first, then executable `~/.codex/packages/standalone/current/bin/codex`.
+- **Images:** repeatable `--image <path>` validates files exist before spawn (exit `2` if missing).
 
-| Operation | Underlying CLI invocation | Notes |
-| --- | --- | --- |
-| `scout` | `codex exec -s read-only -C <cwd> -c model_reasoning_effort="<effort>" --json [--image <path> ...] -` | Prompt arrives on stdin to avoid shell quoting bugs. |
-| `ship` | `codex exec -s workspace-write -C <cwd> -c model_reasoning_effort="<effort>" --json [--output-schema <schema>] [--image <path> ...] -` | Acquires exclusive worktree lock before launch. |
-| `resume` | `codex exec resume <session_id> --json [-c model_reasoning_effort="<effort>"] [--image <path> ...] -` | Never passes `-s` or `-C` (rejected by `codex exec resume`); sets subprocess `cwd` instead. |
-| `review` | `codex exec review --json [--base <branch> \| --uncommitted \| --commit <sha>] [-]` | Runs in subprocess `cwd`. |
+## 2. Reasoning Effort (`ultra` Forbidden)
 
-### Binary Resolution and Image Attachments
+`CodexAdapter` enforces `effort in {"medium", "high", "xhigh"}` before spawn (`ultra`/unknown exits `2`):
 
-- **Codex Desktop standalone fallback.** `CodexAdapter` checks `codex` in `PATH` first. If absent, it falls back to `~/.codex/packages/standalone/current/bin/codex` when executable, so Codex Desktop installations work without manual `PATH` edits.
-- **Image attachments (`--image`).** Pass repeatable `--image <path>` flags on `drive.py run` or `drive.py resume` to forward screenshots or UI mocks directly to Codex. `drive.py` verifies every image file exists before spawning and exits with code `2` if missing.
+| `--effort` | Scope |
+| --- | --- |
+| `medium` | Single-module patch or quick read-only scout with explicit boundary files. |
+| `high` | Cross-module tracing, interface updates, or full verification chains. |
+| `xhigh` | Concurrency bugs, state machines, or multi-factor root-cause analysis. |
 
-## 2. Reasoning Effort Tiers (`ultra` Is Forbidden)
+## 3. GPT-6.2 Prompting Rules
 
-`CodexAdapter` enforces a strict allowlist (`medium`, `high`, `xhigh`) before spawning any subprocess. Passing `ultra` or an unrecognized value exits immediately with code `2`.
-
-| Task depth | `--effort` | Typical scope |
-| --- | --- | --- |
-| Quick reconnaissance or narrow patch | `medium` | Single-module edit, targeted bug fix, or light read-only check with explicit boundary files. |
-| Cross-module tracing or full verification | `high` | Multi-file root-cause trace, interface updates, or long verification chains. |
-| Deep multi-factor analysis | `xhigh` | Concurrency bugs, state-machine design, or complex system failures requiring hypothesis elimination. |
-
-## 3. Prompting Rules for Codex Models (GPT-6.2 Family)
-
-Apply these rules when writing `--prompt-file` payloads for `--worker codex`:
-
-1. **Write like a brief to a senior teammate.** Point straight to target files, existing types, and observed behavior. Instruct Codex to reuse existing classes, helpers, and APIs instead of inventing parallel structures, and to preserve caller behavior unless the task explicitly changes it. Add new tests only when requested, required by repo rules, or needed to cover a real regression gap.
-2. **Prevent premature stopping.** Codex tends to pause at minor ambiguities and return a list of "suggested next steps." State clearly in the prompt that authorized next steps must be executed to completion in the same turn, with reversible assumptions documented in the receipt.
-3. **Do not add vague "be concise" instructions.** Default Codex prose is already compact; adding generic brevity instructions degrades responses into telegraphic fragments. Instead require accurate domain terminology, active voice, front-loaded conclusions, and a self-contained final answer written for a reader who did not see intermediate tool steps.
-4. **Grant subagents selectively.** Include `"use subagents as needed"` only when the slice has clean read-only or non-overlapping parallel sub-problems. Omit it for single-track edits or shared write targets.
-5. **Preserve prefix discipline on `resume`.** When looping on `auto-fix`, resume the same thread (`drive.py resume --session <id>`) with small, concrete `file:line` corrections rather than restarting from scratch or switching models mid-slice. Reinforce clean work explicitly so the model does not over-correct and rewrite sound code.
-6. **UI and visual slices.** Specify concrete visual style and typography up front. Strip decorative badges, redundant labels, and text that merely restates visible UI state. Require real-size rendering and interactive path verification rather than source inspection alone.
-7. **Keep project `AGENTS.md` lean.** Put only repository conventions that cannot be inferred from code.
+1. **Teammate brief + reuse:** point directly to files, symbols, and observed behavior; reuse existing classes/helpers/APIs and preserve caller behavior; add tests only when requested, required by repo rules, or closing a regression gap.
+2. **Anti-early-stop:** require finishing all authorized steps in one turn with reversible assumptions logged, never ending at "suggested next steps."
+3. **No vague "be concise":** default output is already tight; require accurate domain terms, active voice, front-loaded conclusions, and a self-contained final answer.
+4. **Selective subagents:** include `"use subagents as needed"` only for clean parallel read-only or non-overlapping sub-tasks; omit for single-track or shared writes.
+5. **Prefix discipline on `resume`:** loop `auto-fix` in the same session with small `file:line` edits; affirm sound work explicitly so the model does not over-correct.
+6. **UI slices:** specify style/typography up front, strip filler badges/redundant labels, and require real-size rendering plus interactive path checks.
+7. **Lean `AGENTS.md`:** record only conventions that cannot be inferred from code.

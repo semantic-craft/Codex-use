@@ -1,33 +1,20 @@
 # Worker Profile: DeepSeek Harness (`--worker dsh`)
 
-Read this profile when running `scripts/drive.py` with `--worker dsh`. Do not copy Codex-only effort tiers or `"use subagents as needed"` hints into DSH prompts.
+Load this profile when invoking `scripts/drive.py` with `--worker dsh`. Keep Codex-only effort tiers and `"use subagents as needed"` hints out of DSH prompts.
 
-## 1. CLI Contract (Measured on `dsh --profile headless`)
+## 1. CLI Contract (`dsh --profile headless`)
 
-| Operation | Underlying CLI invocation | Notes |
-| --- | --- | --- |
-| `scout` | `dsh --profile headless --permission-mode read-only --approval-policy never --json -` | Subprocess `cwd` is set to `--cwd`. |
-| `ship` | `dsh --profile headless --permission-mode workspace-write --approval-policy never [--add-dir <git_common_dir>] --json -` | Acquires exclusive worktree lock and auto-adds shared `.git` metadata dir for linked worktrees. |
-| `resume` | `dsh --profile headless --session-id <session_id> --permission-mode <mode> --approval-policy <policy> [--add-dir <git_common_dir>] --json -` | Continues the persisted DSH session with matching sandbox flags. |
-| `review` | Unsupported natively | `drive.py review --worker dsh` exits `1` and recommends host-side `git diff` audit or `--worker codex`. |
+- `scout`: `dsh --profile headless --permission-mode read-only --approval-policy never --json -` (subprocess `cwd`).
+- `ship`: `dsh --profile headless --permission-mode workspace-write --approval-policy never [--add-dir <git_common_dir>] --json -` (exclusive worktree lock + auto `--add-dir` for linked worktrees).
+- `resume`: `dsh --profile headless --session-id <id> --permission-mode <mode> --approval-policy <policy> [--add-dir <git_common_dir>] --json -`.
+- `review`: unsupported natively (`drive.py review --worker dsh` exits `1` and recommends host diff audit or `--worker codex`).
 
-## 2. Permission Modes and Safety Guard
+## 2. Safety Guards and Worktree Access
 
-`DshAdapter` validates `--permission-mode` and `--approval-policy` before launching `dsh`:
+- `danger-full-access` exits `2` unless `--allow-danger` is passed explicitly.
+- `--image` exits `2` (never silently dropped) because `dsh --profile headless` does not support image attachments; use `--worker codex` for visual slices.
+- Under `workspace-write`, `DshAdapter` runs `git -C <cwd> rev-parse --git-common-dir` and appends `--add-dir <common_dir>` automatically whenever shared Git metadata lies outside `<cwd>`, enabling `git` operations in linked worktrees without widening permissions.
 
-- `scout` defaults to `--permission-mode read-only --approval-policy never`.
-- `ship` defaults to `--permission-mode workspace-write --approval-policy never`.
-- `danger-full-access` is rejected with exit code `2` unless `--allow-danger` is explicitly supplied. Avoid it in normal worktree workflows.
-- `--image` attachments are explicitly rejected with exit code `2` because `dsh --profile headless` does not support image attachments (never silently dropped). Use `--worker codex` when a slice needs screenshots or visual references.
+## 3. Credentials and Receipts
 
-## 3. Linked Git Worktree `.git` Access
-
-A linked git worktree points its `.git` file at `<main-repo>/.git/worktrees/<task>`. Under `workspace-write`, DSH restricts filesystem writes to `cwd` unless shared Git metadata is explicitly granted.
-
-`DshAdapter` resolves `git -C <cwd> rev-parse --git-common-dir` automatically whenever `permission-mode` is `workspace-write`. If the common Git directory lies outside `<cwd>`, `drive.py` appends `--add-dir <resolved_common_dir>` on both `run` and `resume` so `git status`, `git diff`, and `git commit` succeed inside linked worktrees without widening permissions to `danger-full-access`.
-
-## 4. Credentials and NDJSON Auditing
-
-`dsh --profile headless` requires either `DEEPSEEK_API_KEY` in the environment or the headless credentials patch in `~/.dsh/profiles/headless/cordis.patch.yml`. If credentials are missing, DSH emits a structured `MISSING_CREDENTIAL` status/final NDJSON event; `DshAdapter.parse_jsonl` surfaces that exact error in `AuditSummary.errors`.
-
-Because `dsh --profile headless` does not expose a native `--output-schema` flag, include the four-item receipt JSON structure directly in your prompt when you want `drive.py` to populate `AuditSummary.receipt` and `receipt_valid`.
+`dsh --profile headless` requires `DEEPSEEK_API_KEY` or the headless credentials patch in `~/.dsh/profiles/headless/cordis.patch.yml`. Missing credentials surface as `MISSING_CREDENTIAL` in `AuditSummary.errors`. Because DSH has no native `--output-schema` flag, include the receipt JSON shape in the prompt when you want `AuditSummary.receipt` parsed and validated.
