@@ -68,6 +68,7 @@ FILE_WRITE_TOOL_NAMES: frozenset[str] = frozenset(
         "patch_file",
     }
 )
+COMPACT_COMMAND_LIMIT = 120
 OUTPUT_PREVIEW_LIMIT = 160
 FULL_OUTPUT_PREVIEW_LIMIT = 400
 SAFE_DISPOSABLE_NAMES: frozenset[str] = frozenset(
@@ -1346,6 +1347,28 @@ def _prepare_log_path(log_dir: Path | None, worker: WorkerId, mode: RunMode) -> 
     return base_dir / f"{worker}-{mode}-{stamp}-{os.getpid()}.jsonl"
 
 
+def _compact_command_record(record: CommandRecord) -> CommandRecord:
+    collapsed = " ".join(record.command.split())
+    if len(collapsed) > COMPACT_COMMAND_LIMIT:
+        collapsed = collapsed[: COMPACT_COMMAND_LIMIT - 3] + "..."
+    preview = "" if record.exit_code == 0 else record.output_preview
+    return CommandRecord(
+        command=collapsed,
+        exit_code=record.exit_code,
+        status=record.status,
+        output_preview=preview,
+    )
+
+
+def _serialize_audit_summary(summary: AuditSummary, full_output: bool) -> dict[str, Any]:
+    data = dataclasses.asdict(summary)
+    if not full_output:
+        for cmd_entry in data["commands"]:
+            if cmd_entry.get("exit_code") == 0 and cmd_entry.get("output_preview") == "":
+                cmd_entry.pop("output_preview", None)
+    return data
+
+
 def _execute_worker(
     adapter: WorkerAdapter,
     cmd: list[str],
@@ -1394,6 +1417,11 @@ def _execute_worker(
     summary_final_message: str | None = (
         None if (receipt_valid is True and not full_output) else raw_final_message
     )
+    commands = (
+        parsed.commands
+        if full_output
+        else [_compact_command_record(record) for record in parsed.commands]
+    )
     git_diff_files = collect_git_diff_files(cwd, base=base_sha)
 
     return AuditSummary(
@@ -1401,7 +1429,7 @@ def _execute_worker(
         mode=mode,
         session_id=parsed.session_id,
         exit_code=proc.returncode,
-        commands=parsed.commands,
+        commands=commands,
         changed_files=parsed.changed_files,
         git_diff_files=git_diff_files,
         errors=errors,
@@ -1524,7 +1552,7 @@ def _handle_run(args: argparse.Namespace) -> int:
             base_sha=args.base,
             full_output=args.full_output,
         )
-    _emit_json(summary)
+    _emit_json(_serialize_audit_summary(summary, full_output=args.full_output))
     return EXIT_OK if summary.exit_code == 0 else EXIT_ERROR
 
 
@@ -1576,7 +1604,7 @@ def _handle_resume(args: argparse.Namespace) -> int:
             base_sha=args.base,
             full_output=args.full_output,
         )
-    _emit_json(summary)
+    _emit_json(_serialize_audit_summary(summary, full_output=args.full_output))
     return EXIT_OK if summary.exit_code == 0 else EXIT_ERROR
 
 
@@ -1625,7 +1653,7 @@ def _handle_review(args: argparse.Namespace) -> int:
         base_sha=args.base,
         full_output=args.full_output,
     )
-    _emit_json(summary)
+    _emit_json(_serialize_audit_summary(summary, full_output=args.full_output))
     return EXIT_OK if summary.exit_code == 0 else EXIT_ERROR
 
 
@@ -1643,12 +1671,17 @@ def _handle_audit(args: argparse.Namespace) -> int:
     summary_final_message: str | None = (
         None if (receipt_valid is True and not args.full_output) else parsed.final_message
     )
+    commands = (
+        parsed.commands
+        if args.full_output
+        else [_compact_command_record(record) for record in parsed.commands]
+    )
     summary = AuditSummary(
         worker=adapter.name,
         mode=args.mode,
         session_id=parsed.session_id,
         exit_code=args.exit_code,
-        commands=parsed.commands,
+        commands=commands,
         changed_files=parsed.changed_files,
         git_diff_files=git_diff_files,
         errors=parsed.errors,
@@ -1658,7 +1691,7 @@ def _handle_audit(args: argparse.Namespace) -> int:
         usage=parsed.usage,
         raw_log=str(log_path.resolve()),
     )
-    _emit_json(summary)
+    _emit_json(_serialize_audit_summary(summary, full_output=args.full_output))
     return EXIT_OK if summary.exit_code == 0 and not summary.errors else EXIT_ERROR
 
 

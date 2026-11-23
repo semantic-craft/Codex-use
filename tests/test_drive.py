@@ -447,6 +447,15 @@ class CodexAdapterTests(unittest.TestCase):
 
     def test_compact_audit_summary_vs_full_output_and_plain_message(self) -> None:
         long_output = "X" * 300
+        long_fail_output = "E" * 300
+        long_multiline_cmd = (
+            "python3 -c '\n"
+            + "print("
+            + '"very_long_segment_" * 10'
+            + ")\n"
+            + "' --extra-flag "
+            + ("a" * 120)
+        )
         receipt_obj = {
             "summary": "Verified fix.",
             "changed_files": ["src/a.py"],
@@ -461,10 +470,22 @@ class CodexAdapterTests(unittest.TestCase):
                     "type": "item.completed",
                     "item": {
                         "type": "command_execution",
-                        "command": "pytest",
+                        "command": long_multiline_cmd,
                         "aggregated_output": long_output,
                         "exit_code": 0,
                         "status": "completed",
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "command": "pytest tests/test_fail.py",
+                        "aggregated_output": long_fail_output,
+                        "exit_code": 1,
+                        "status": "failed",
                     },
                 }
             ),
@@ -501,8 +522,13 @@ class CodexAdapterTests(unittest.TestCase):
             compact = json.loads(compact_proc.stdout)
             self.assertTrue(compact["receipt_valid"])
             self.assertIsNone(compact["final_message"])
-            self.assertEqual(len(compact["commands"][0]["output_preview"]), 160)
-            self.assertTrue(compact["commands"][0]["output_preview"].endswith("..."))
+            ok_cmd, fail_cmd = compact["commands"]
+            self.assertNotIn("output_preview", ok_cmd)
+            self.assertNotIn("\n", ok_cmd["command"])
+            self.assertEqual(len(ok_cmd["command"]), 120)
+            self.assertTrue(ok_cmd["command"].endswith("..."))
+            self.assertEqual(len(fail_cmd["output_preview"]), 160)
+            self.assertTrue(fail_cmd["output_preview"].endswith("..."))
 
             full_proc = _run_drive(
                 [
@@ -520,7 +546,10 @@ class CodexAdapterTests(unittest.TestCase):
             full = json.loads(full_proc.stdout)
             self.assertTrue(full["receipt_valid"])
             self.assertEqual(full["final_message"], json.dumps(receipt_obj))
-            self.assertEqual(len(full["commands"][0]["output_preview"]), 300)
+            full_ok_cmd, full_fail_cmd = full["commands"]
+            self.assertEqual(full_ok_cmd["command"], long_multiline_cmd)
+            self.assertEqual(len(full_ok_cmd["output_preview"]), 300)
+            self.assertEqual(len(full_fail_cmd["output_preview"]), 300)
 
             plain_log = Path(td) / "plain.jsonl"
             plain_log.write_text("\n".join(plain_lines) + "\n", encoding="utf-8")
