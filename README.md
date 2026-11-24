@@ -5,7 +5,7 @@
 <p><strong>Stop arguing with GPT and Codex directly. Protect your cognitive bandwidth, keep your good mood, and let an optimistic host agent babysit the worker.</strong></p>
 
 <p>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-7c6cf6?style=flat-square" alt="License: Apache-2.0" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-7c6cf6?style=flat-square" alt="License: MIT" /></a>
   <img src="https://img.shields.io/badge/Python-3.10%2B%20stdlib%20only-3b82f6?style=flat-square" alt="Python 3.10+ stdlib only" />
   <img src="https://img.shields.io/badge/Workers-Codex%20CLI%20%C2%B7%20DSH-10b981?style=flat-square" alt="Workers: Codex CLI and DSH" />
   <img src="https://img.shields.io/badge/Hosts-Antigravity%20%C2%B7%20Grok%20Bot%20%C2%B7%20DSH-8b5cf6?style=flat-square" alt="Hosts: Antigravity, Grok Bot, DSH" />
@@ -179,4 +179,4 @@ python3 -m unittest discover -s tests -v
 
 ## License
 
-Licensed under the [Apache License 2.0](LICENSE).
+Licensed under the [MIT License](LICENSE).

@@ -5,7 +5,7 @@
 <p><strong>别再亲自跟 GPT / Codex 硬聊了：把监工、催活和审计外包给乐观自信的主 Agent 教练，保住你的认知带宽与好心情。</strong></p>
 
 <p>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-7c6cf6?style=flat-square" alt="License: Apache-2.0" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-7c6cf6?style=flat-square" alt="License: MIT" /></a>
   <img src="https://img.shields.io/badge/Python-3.10%2B%20%E9%9B%B6%E4%BE%9D%E8%B5%96-3b82f6?style=flat-square" alt="Python 3.10+ 零依赖" />
   <img src="https://img.shields.io/badge/Workers-Codex%20CLI%20%C2%B7%20DSH-10b981?style=flat-square" alt="Workers: Codex CLI 与 DSH" />
   <img src="https://img.shields.io/badge/Hosts-Antigravity%20%C2%B7%20Grok%20Bot%20%C2%B7%20DSH-8b5cf6?style=flat-square" alt="Hosts: Antigravity, Grok Bot, DSH" />
@@ -177,4 +177,4 @@ python3 -m unittest discover -s tests -v
 
 ## 开源协议
 
-基于 [Apache License 2.0](LICENSE) 发布。
+基于 [MIT License](LICENSE) 发布。

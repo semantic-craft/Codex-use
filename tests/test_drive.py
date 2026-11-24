@@ -1085,7 +1085,7 @@ class RepositoryContractTests(unittest.TestCase):
         agy = json.loads((REPO_ROOT / "plugin.json").read_text(encoding="utf-8"))
         self.assertEqual(agy["$schema"], "https://antigravity.google/schemas/v1/plugin.json")
         self.assertEqual(agy["name"], "codex-use")
-        self.assertEqual(agy["license"], "Apache-2.0")
+        self.assertEqual(agy["license"], "MIT")
         self.assertTrue(agy["suggestedPrompts"])
 
         grok = json.loads(

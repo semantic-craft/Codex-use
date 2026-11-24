@@ -2,7 +2,7 @@
   "name": "codex-use",
   "version": "0.1.0",
   "description": "Standalone open-source skill and zero-dependency runner for driving Codex CLI and DeepSeek Harness in isolated git worktrees with real-command JSONL verification.",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "keywords": [
     "codex",
     "codex-use",
