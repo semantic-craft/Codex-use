@@ -1,50 +1,42 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 470" role="img" aria-labelledby="title desc">
-  <title id="title">Codex-use: Anxious Direct GPT Chat vs Upbeat Host-Coached Workflow</title>
-  <desc id="desc">Animated Spaceman-inspired comparison showing a nervous, mistake-averse Codex robot stalling in direct chat versus an optimistic Gemini coach robot encouraging Codex inside an isolated git worktree with JSONL verification.</desc>
+  <title id="title">Codex-use: Anxious GPT Worker Coached by an Optimistic Gemini Host</title>
+  <desc id="desc">Original animated comparison showing a hesitant terminal-bot Codex stalling in direct human chat versus an upbeat glowing Gemini star coach cheering Codex inside an isolated git worktree with JSONL verification.</desc>
   <defs>
     <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#0d1021"/>
-      <stop offset="100%" stop-color="#171b34"/>
+      <stop offset="0%" stop-color="#0b1120"/>
+      <stop offset="100%" stop-color="#151e34"/>
     </linearGradient>
     <linearGradient id="leftCard" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#26162b"/>
-      <stop offset="100%" stop-color="#181224"/>
+      <stop offset="0%" stop-color="#271522"/>
+      <stop offset="100%" stop-color="#17111e"/>
     </linearGradient>
     <linearGradient id="rightCard" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#16223d"/>
-      <stop offset="100%" stop-color="#111a2e"/>
+      <stop offset="0%" stop-color="#12233b"/>
+      <stop offset="100%" stop-color="#0f1b2c"/>
     </linearGradient>
-    <linearGradient id="squircleWarn" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#8b5cf6"/>
-      <stop offset="100%" stop-color="#ec4899"/>
-    </linearGradient>
-    <linearGradient id="squircleGemini" x1="0%" y1="0%" x2="100%" y2="100%">
+    <linearGradient id="geminiStar" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#60a5fa"/>
-      <stop offset="50%" stop-color="#7c6cf6"/>
-      <stop offset="100%" stop-color="#9b6bff"/>
+      <stop offset="50%" stop-color="#818cf8"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
     </linearGradient>
-    <linearGradient id="squircleCodexOk" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#6366f1"/>
-      <stop offset="100%" stop-color="#10b981"/>
+    <linearGradient id="codexWarn" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3b2234"/>
+      <stop offset="100%" stop-color="#261626"/>
     </linearGradient>
-    <linearGradient id="helmetWhite" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#ffffff"/>
-      <stop offset="100%" stop-color="#dbe4ff"/>
+    <linearGradient id="codexCalm" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#143b36"/>
+      <stop offset="100%" stop-color="#0f282a"/>
     </linearGradient>
     <linearGradient id="wordGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#7aa2ff"/>
-      <stop offset="100%" stop-color="#b794ff"/>
+      <stop offset="0%" stop-color="#60a5fa"/>
+      <stop offset="55%" stop-color="#a78bfa"/>
+      <stop offset="100%" stop-color="#34d399"/>
     </linearGradient>
-    <pattern id="scanlines" width="4" height="4" patternUnits="userSpaceOnUse">
-      <rect width="4" height="2.2" fill="#38e8ff"/>
-      <rect y="2.2" width="4" height="1.8" fill="#132238" fill-opacity="0.7"/>
-    </pattern>
-    <pattern id="scanlinesWarn" width="4" height="4" patternUnits="userSpaceOnUse">
-      <rect width="4" height="2.2" fill="#fb7185"/>
-      <rect y="2.2" width="4" height="1.8" fill="#231222" fill-opacity="0.7"/>
-    </pattern>
+    <filter id="glowBlue" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="0" stdDeviation="6" flood-color="#60a5fa" flood-opacity="0.55"/>
+    </filter>
     <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#050814" flood-opacity="0.45"/>
+      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#030712" flood-opacity="0.45"/>
     </filter>
     <style>
       .title { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Helvetica, Arial, sans-serif; font-weight: 700; }
@@ -65,9 +57,9 @@
         0%, 100% { opacity: 0.4; }
         50% { opacity: 1; }
       }
-      @keyframes floatSoft {
-        0%, 100% { transform: translateY(0px); }
-        50% { transform: translateY(-3.5px); }
+      @keyframes floatStar {
+        0%, 100% { transform: translateY(0px) rotate(0deg); }
+        50% { transform: translateY(-4px) rotate(3deg); }
       }
       @keyframes flowBeam {
         from { stroke-dashoffset: 24; }
@@ -75,15 +67,20 @@
       }
       @keyframes twinkle {
         0%, 100% { opacity: 0.35; transform: scale(0.85); }
-        50% { opacity: 1; transform: scale(1.2); }
+        50% { opacity: 1; transform: scale(1.25); }
+      }
+      @keyframes happyNod {
+        0%, 100% { transform: translateY(0px); }
+        50% { transform: translateY(-2.5px); }
       }
       .shiver { animation: shiver 0.65s ease-in-out infinite; }
       .sweat { animation: sweatDrop 1.7s ease-in-out infinite; }
       .warn { animation: warnPulse 1.5s ease-in-out infinite; }
-      .float { animation: floatSoft 2.5s ease-in-out infinite; }
+      .floatStar { transform-box: fill-box; transform-origin: center; animation: floatStar 2.6s ease-in-out infinite; }
       .beam { stroke-dasharray: 6 6; animation: flowBeam 1s linear infinite; }
-      .star1 { transform-box: fill-box; transform-origin: center; animation: twinkle 1.7s ease-in-out infinite; }
-      .star2 { transform-box: fill-box; transform-origin: center; animation: twinkle 1.7s ease-in-out 0.85s infinite; }
+      .star1 { transform-box: fill-box; transform-origin: center; animation: twinkle 1.6s ease-in-out infinite; }
+      .star2 { transform-box: fill-box; transform-origin: center; animation: twinkle 1.6s ease-in-out 0.8s infinite; }
+      .nod { animation: happyNod 2.2s ease-in-out infinite; }
     </style>
   </defs>
 
@@ -93,8 +90,8 @@
   <text x="480" y="39" text-anchor="middle" fill="url(#wordGrad)" class="title" font-size="21">
     Anxious Perfectionist Bot Meets an Optimistic Coach
   </text>
-  <text x="480" y="61" text-anchor="middle" fill="#9aa8cc" class="body" font-size="13">
-    Pair a shy, mistake-averse Codex worker with an upbeat host agent (Gemini / Antigravity / Grok / DSH)
+  <text x="480" y="61" text-anchor="middle" fill="#94a3b8" class="body" font-size="13">
+    Pair a hesitant, mistake-averse Codex worker with an upbeat Gemini / Host Agent coach
   </text>
 
   <!-- ==================== LEFT PANEL: BEFORE ==================== -->
@@ -102,24 +99,23 @@
   <rect x="46" y="98" width="180" height="26" rx="13" fill="#f43f5e" fill-opacity="0.18"/>
   <text x="136" y="115" text-anchor="middle" fill="#fda4af" class="title" font-size="11.5">BEFORE · DIRECT GPT CHAT</text>
 
-  <!-- Anxious Spaceman-style Codex Squircle -->
+  <!-- Shy anxious terminal-cube Codex character -->
   <g class="shiver">
-    <rect x="52" y="142" width="156" height="114" rx="14" fill="#211428" stroke="#fb7185" stroke-opacity="0.45" stroke-width="1.2"/>
+    <rect x="52" y="142" width="156" height="114" rx="14" fill="#211320" stroke="#fb7185" stroke-opacity="0.45" stroke-width="1.2"/>
     <text x="130" y="160" text-anchor="middle" fill="#fda4af" class="title" font-size="11">Codex / GPT</text>
-    <!-- Squircle Icon -->
-    <rect x="102" y="169" width="56" height="56" rx="14" fill="url(#squircleWarn)" filter="url(#softShadow)"/>
-    <!-- Side pods -->
-    <rect x="103" y="191" width="6" height="12" rx="3" fill="#e2e8f0"/>
-    <rect x="151" y="191" width="6" height="12" rx="3" fill="#e2e8f0"/>
-    <!-- Helmet -->
-    <rect x="108" y="177" width="44" height="40" rx="14" fill="url(#helmetWhite)"/>
-    <!-- Visor -->
-    <rect x="114" y="183" width="32" height="28" rx="9" fill="#171426"/>
-    <!-- Nervous scanline eyes -->
-    <rect x="120" y="191" width="7" height="11" rx="3.5" fill="url(#scanlinesWarn)"/>
-    <rect x="133" y="191" width="7" height="11" rx="3.5" fill="url(#scanlinesWarn)"/>
+    <!-- Terminal cube body -->
+    <rect x="100" y="172" width="60" height="52" rx="12" fill="url(#codexWarn)" stroke="#fb7185" stroke-width="1.8" filter="url(#softShadow)"/>
+    <!-- Tiny window dots + prompt badge -->
+    <circle cx="110" cy="180" r="2" fill="#fb7185" fill-opacity="0.8"/>
+    <circle cx="117" cy="180" r="2" fill="#fbbf24" fill-opacity="0.8"/>
+    <text x="148" y="183" text-anchor="end" fill="#fda4af" class="mono" font-size="8.5">&gt;_</text>
+    <!-- Worried eyes & wavy mouth -->
+    <circle cx="120" cy="197" r="3" fill="#fecdd3"/>
+    <circle cx="140" cy="197" r="3" fill="#fecdd3"/>
+    <path d="M116 190 L124 192 M144 190 L136 192" stroke="#fda4af" stroke-width="1.6" stroke-linecap="round"/>
+    <path d="M120 211 Q125 207 130 211 Q135 207 140 211" fill="none" stroke="#fda4af" stroke-width="1.8" stroke-linecap="round"/>
     <!-- Sweat drop -->
-    <path class="sweat" d="M161 174 C161 174 166 181 166 184.5 C166 187.3 163.8 189.5 161 189.5 C158.2 189.5 156 187.3 156 184.5 C156 181 161 174 161 174 Z" fill="#38e8ff"/>
+    <path class="sweat" d="M166 177 C166 177 171 184 171 187.5 C171 190.3 168.8 192.5 166 192.5 C163.2 192.5 161 190.3 161 187.5 C161 184 166 177 166 177 Z" fill="#38bdf8"/>
     <text x="130" y="245" text-anchor="middle" fill="#fecdd3" class="mono" font-size="9.5">"Please confirm first..."</text>
   </g>
 
@@ -129,16 +125,16 @@
   <text x="246" y="222" text-anchor="middle" fill="#fda4af" class="body" font-size="10">tug-of-war</text>
 
   <!-- Stressed Human -->
-  <rect x="284" y="142" width="160" height="114" rx="14" fill="#211428" stroke="#f59e0b" stroke-opacity="0.45" stroke-width="1.2"/>
+  <rect x="284" y="142" width="160" height="114" rx="14" fill="#211320" stroke="#f59e0b" stroke-opacity="0.45" stroke-width="1.2"/>
   <text x="364" y="160" text-anchor="middle" fill="#fcd34d" class="title" font-size="11">You (Human)</text>
-  <circle cx="364" cy="197" r="24" fill="#361a2a" stroke="#fb7185" stroke-width="2" filter="url(#softShadow)"/>
+  <circle cx="364" cy="197" r="24" fill="#361a26" stroke="#fb7185" stroke-width="2" filter="url(#softShadow)"/>
   <path d="M353 191 L359 195 M359 191 L353 195 M369 191 L375 195 M375 191 L369 195" stroke="#fda4af" stroke-width="2" stroke-linecap="round"/>
   <path d="M354 209 Q364 201 374 209" fill="none" stroke="#fda4af" stroke-width="2" stroke-linecap="round"/>
   <path class="warn" d="M396 177 L389 189 L396 189 L390 201" fill="none" stroke="#fbbf24" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
   <text x="364" y="245" text-anchor="middle" fill="#fde68a" class="mono" font-size="9.5">"Just run the tests!"</text>
 
   <!-- Failure list -->
-  <rect x="48" y="270" width="396" height="86" rx="10" fill="#231626" stroke="#f43f5e" stroke-opacity="0.32" stroke-width="1"/>
+  <rect x="48" y="270" width="396" height="86" rx="10" fill="#231624" stroke="#f43f5e" stroke-opacity="0.32" stroke-width="1"/>
   <text x="64" y="292" fill="#fecdd3" class="mono" font-size="11">• Refuses to act: "Here are suggested next steps..."</text>
   <text x="64" y="312" fill="#fecdd3" class="mono" font-size="11">• Over-defensive shims &amp; lecturing disclaimer tone</text>
   <text x="64" y="332" fill="#fecdd3" class="mono" font-size="11">• Cryptic jargon + dirty tree + unverified prose</text>
@@ -149,58 +145,58 @@
   <text x="64" y="411" fill="#e2e8f0" class="body" font-size="11.5">+11.2% cognitive load (CSU '26) · +19% slower (METR '25)</text>
 
   <!-- ==================== RIGHT PANEL: AFTER ==================== -->
-  <rect x="496" y="82" width="436" height="360" rx="16" fill="url(#rightCard)" stroke="#7c6cf6" stroke-opacity="0.55" stroke-width="1.5"/>
-  <rect x="514" y="98" width="186" height="26" rx="13" fill="#6366f1" fill-opacity="0.25"/>
-  <text x="607" y="115" text-anchor="middle" fill="#a5b4fc" class="title" font-size="11.5">AFTER · WITH CODEX-USE</text>
+  <rect x="496" y="82" width="436" height="360" rx="16" fill="url(#rightCard)" stroke="#60a5fa" stroke-opacity="0.5" stroke-width="1.5"/>
+  <rect x="514" y="98" width="186" height="26" rx="13" fill="#3b82f6" fill-opacity="0.22"/>
+  <text x="607" y="115" text-anchor="middle" fill="#93c5fd" class="title" font-size="11.5">AFTER · WITH CODEX-USE</text>
 
-  <!-- Optimistic Gemini Coach (Spaceman Squircle Style) -->
-  <rect x="514" y="142" width="166" height="114" rx="14" fill="#13213b" stroke="#818cf8" stroke-opacity="0.55" stroke-width="1.4"/>
-  <text x="597" y="160" text-anchor="middle" fill="#a5b4fc" class="title" font-size="11">Gemini / Host Coach</text>
-  <g class="float">
-    <rect x="569" y="169" width="56" height="56" rx="14" fill="url(#squircleGemini)" filter="url(#softShadow)"/>
-    <rect x="570" y="191" width="6" height="12" rx="3" fill="#e0e7ff"/>
-    <rect x="618" y="191" width="6" height="12" rx="3" fill="#e0e7ff"/>
-    <rect x="575" y="177" width="44" height="40" rx="14" fill="url(#helmetWhite)"/>
-    <rect x="581" y="183" width="32" height="28" rx="9" fill="#11182c"/>
-    <!-- Happy glowing cyan scanline eyes -->
-    <rect x="587" y="190" width="7" height="13" rx="3.5" fill="url(#scanlines)"/>
-    <rect x="600" y="190" width="7" height="13" rx="3.5" fill="url(#scanlines)"/>
-    <!-- Gemini sparkles -->
-    <path class="star1" d="M632 172 L634.5 178 L640.5 180.5 L634.5 183 L632 189 L629.5 183 L623.5 180.5 L629.5 178 Z" fill="#60a5fa"/>
-    <path class="star2" d="M561 177 L562.8 181 L566.8 182.8 L562.8 184.6 L561 188.6 L559.2 184.6 L555.2 182.8 L559.2 181 Z" fill="#38e8ff"/>
+  <!-- Original Smiling Radiant Gemini Four-Point Star Coach -->
+  <rect x="514" y="142" width="166" height="114" rx="14" fill="#11223d" stroke="#60a5fa" stroke-opacity="0.55" stroke-width="1.4"/>
+  <text x="597" y="160" text-anchor="middle" fill="#93c5fd" class="title" font-size="11">Gemini / Host Coach</text>
+  <g class="floatStar">
+    <!-- Radiant 4-point star body -->
+    <path d="M597 166 C601 184 611 194 629 198 C611 202 601 212 597 230 C593 212 583 202 565 198 C583 194 593 184 597 166 Z" fill="url(#geminiStar)" filter="url(#glowBlue)"/>
+    <!-- Cheerful face on the star -->
+    <circle cx="591" cy="195" r="2.2" fill="#0b1120"/>
+    <circle cx="603" cy="195" r="2.2" fill="#0b1120"/>
+    <path d="M590 202 Q597 208 604 202" fill="none" stroke="#0b1120" stroke-width="2" stroke-linecap="round"/>
+    <!-- Mini cheering sparkles -->
+    <path class="star1" d="M635 174 L637.5 179.5 L643 182 L637.5 184.5 L635 190 L632.5 184.5 L627 182 L632.5 179.5 Z" fill="#fde047"/>
+    <path class="star2" d="M558 179 L559.8 183 L563.8 184.8 L559.8 186.6 L558 190.6 L556.2 186.6 L552.2 184.8 L556.2 183 Z" fill="#34d399"/>
   </g>
-  <text x="597" y="245" text-anchor="middle" fill="#c7d2fe" class="mono" font-size="9.5">"Safe worktree, ship it!"</text>
+  <text x="597" y="245" text-anchor="middle" fill="#bfdbfe" class="mono" font-size="9.5">"Worktree's safe, go!"</text>
 
   <!-- Animated encouragement beam -->
-  <line class="beam" x1="684" y1="197" x2="742" y2="197" stroke="#38e8ff" stroke-width="2.6" stroke-linecap="round"/>
-  <polygon points="746,197 738,192 738,202" fill="#38e8ff"/>
-  <text x="714" y="185" text-anchor="middle" fill="#7dd3fc" class="title" font-size="9.5">Cheer &amp;</text>
-  <text x="714" y="215" text-anchor="middle" fill="#7dd3fc" class="title" font-size="9.5">Guardrails</text>
+  <line class="beam" x1="684" y1="197" x2="742" y2="197" stroke="#34d399" stroke-width="2.6" stroke-linecap="round"/>
+  <polygon points="746,197 738,192 738,202" fill="#34d399"/>
+  <text x="714" y="185" text-anchor="middle" fill="#6ee7b7" class="title" font-size="9.5">Cheer &amp;</text>
+  <text x="714" y="215" text-anchor="middle" fill="#6ee7b7" class="title" font-size="9.5">Guardrails</text>
 
-  <!-- Reassured Codex Bot (Spaceman Squircle Style) -->
-  <rect x="750" y="142" width="164" height="114" rx="14" fill="#102533" stroke="#34d399" stroke-opacity="0.55" stroke-width="1.3"/>
+  <!-- Reassured happy terminal-cube Codex character -->
+  <rect x="750" y="142" width="164" height="114" rx="14" fill="#102630" stroke="#34d399" stroke-opacity="0.55" stroke-width="1.3"/>
   <text x="832" y="160" text-anchor="middle" fill="#6ee7b7" class="title" font-size="11">Codex (Reassured)</text>
-  <rect x="804" y="169" width="56" height="56" rx="14" fill="url(#squircleCodexOk)" filter="url(#softShadow)"/>
-  <rect x="805" y="191" width="6" height="12" rx="3" fill="#d1fae5"/>
-  <rect x="853" y="191" width="6" height="12" rx="3" fill="#d1fae5"/>
-  <rect x="810" y="177" width="44" height="40" rx="14" fill="url(#helmetWhite)"/>
-  <rect x="816" y="183" width="32" height="28" rx="9" fill="#0f1d24"/>
-  <rect x="822" y="190" width="7" height="13" rx="3.5" fill="url(#scanlines)"/>
-  <rect x="835" y="190" width="7" height="13" rx="3.5" fill="url(#scanlines)"/>
-  <!-- Verified badge -->
-  <circle cx="863" cy="176" r="9.5" fill="#10b981"/>
-  <path d="M858.5 176 L861.5 179 L867.5 172.5" fill="none" stroke="#052e1f" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <g class="nod">
+    <rect x="802" y="172" width="60" height="52" rx="12" fill="url(#codexCalm)" stroke="#34d399" stroke-width="1.8" filter="url(#softShadow)"/>
+    <circle cx="812" cy="180" r="2" fill="#34d399"/>
+    <circle cx="819" cy="180" r="2" fill="#60a5fa"/>
+    <text x="850" y="183" text-anchor="end" fill="#6ee7b7" class="mono" font-size="8.5">&gt;_</text>
+    <!-- Happy smiling eyes -->
+    <path d="M817 198 Q821 193 825 198 M839 198 Q843 193 847 198" fill="none" stroke="#d1fae5" stroke-width="2" stroke-linecap="round"/>
+    <path d="M823 207 Q832 214 841 207" fill="none" stroke="#6ee7b7" stroke-width="2" stroke-linecap="round"/>
+    <!-- Green check badge -->
+    <circle cx="865" cy="175" r="9.5" fill="#10b981"/>
+    <path d="M860.5 175 L863.5 178 L869.5 171.5" fill="none" stroke="#052e1f" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
   <text x="832" y="245" text-anchor="middle" fill="#a7f3d0" class="mono" font-size="9.5">"exit_code: 0 · done!"</text>
 
   <!-- Clean pipeline summary -->
-  <rect x="516" y="270" width="396" height="86" rx="10" fill="#101e33" stroke="#6366f1" stroke-opacity="0.35" stroke-width="1"/>
+  <rect x="516" y="270" width="396" height="86" rx="10" fill="#0f1e33" stroke="#60a5fa" stroke-opacity="0.35" stroke-width="1"/>
   <text x="532" y="292" fill="#dbeafe" class="mono" font-size="11">• Host removes fear: isolated worktree + baseline SHA</text>
   <text x="532" y="312" fill="#dbeafe" class="mono" font-size="11">• Any --model (gpt-6.2-astra / sol) + JSONL exit audit</text>
   <text x="532" y="332" fill="#dbeafe" class="mono" font-size="11">• Host translates output into warm, normal human prose</text>
 
   <!-- Happy Human banner right -->
   <rect x="516" y="370" width="396" height="54" rx="10" fill="#10b981" fill-opacity="0.16"/>
-  <g class="float">
+  <g class="nod">
     <circle cx="546" cy="397" r="16" fill="#10382e" stroke="#34d399" stroke-width="2"/>
     <circle cx="541" cy="393" r="2" fill="#6ee7b7"/>
     <circle cx="551" cy="393" r="2" fill="#6ee7b7"/>
