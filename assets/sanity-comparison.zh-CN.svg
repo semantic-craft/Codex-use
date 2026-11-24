@@ -131,9 +131,9 @@
 
   <!-- Failure list -->
   <rect x="48" y="270" width="396" height="86" rx="10" fill="#231624" stroke="#f43f5e" stroke-opacity="0.32" stroke-width="1"/>
-  <text x="64" y="292" fill="#fecdd3" class="body" font-size="11.5">• 拒绝干活甩锅：“以下是建议下一步，你可以自己运行…”</text>
-  <text x="64" y="312" fill="#fecdd3" class="body" font-size="11.5">• 过度防御堆垫片 + 臭名昭著的说教官腔与黑话简写</text>
-  <text x="64" y="332" fill="#fecdd3" class="body" font-size="11.5">• 工作区改脏 + 口头宣称通过却不给真实退出码证据</text>
+  <text x="64" y="292" fill="#fecdd3" class="body" font-size="11.5">• 律师函式叠甲拒担责：“以上不作为正式依据，请先确认…”</text>
+  <text x="64" y="312" fill="#fecdd3" class="body" font-size="11.5">• 干啥都要校验 SHA-256 + 狂堆安全边界、垫片与官腔</text>
+  <text x="64" y="332" fill="#fecdd3" class="body" font-size="11.5">• 甩锅“建议下一步” + 工作区改脏且无真实退出码证据</text>
 
   <!-- Result banner left -->
   <rect x="48" y="370" width="396" height="54" rx="10" fill="#f43f5e" fill-opacity="0.14"/>

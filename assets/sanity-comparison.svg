@@ -135,9 +135,9 @@
 
   <!-- Failure list -->
   <rect x="48" y="270" width="396" height="86" rx="10" fill="#231624" stroke="#f43f5e" stroke-opacity="0.32" stroke-width="1"/>
-  <text x="64" y="292" fill="#fecdd3" class="mono" font-size="11">• Refuses to act: "Here are suggested next steps..."</text>
-  <text x="64" y="312" fill="#fecdd3" class="mono" font-size="11">• Over-defensive shims &amp; lecturing disclaimer tone</text>
-  <text x="64" y="332" fill="#fecdd3" class="mono" font-size="11">• Cryptic jargon + dirty tree + unverified prose</text>
+  <text x="64" y="292" fill="#fecdd3" class="mono" font-size="10.8">• CYA disclaimers: "Not formal advice; please confirm"</text>
+  <text x="64" y="312" fill="#fecdd3" class="mono" font-size="10.8">• SHA-256 checks on plain copies + safety-boundary shims</text>
+  <text x="64" y="332" fill="#fecdd3" class="mono" font-size="10.8">• Dodges responsibility + dirty tree + unverified prose</text>
 
   <!-- Result banner left -->
   <rect x="48" y="370" width="396" height="54" rx="10" fill="#f43f5e" fill-opacity="0.14"/>
