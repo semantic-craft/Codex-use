@@ -14,7 +14,16 @@ You keep Codex's raw coding muscle and pick **any GPT model you want** (`--model
 
 ## Why Not Talk to GPT / Codex Directly? (Backed by Real Studies)
 
-GPT coding models have a well-known personality quirk: **they are anxious perfectionists who hate speaking plain human**. Left alone in a chat box with a developer, they hesitate out of fear of making mistakes, leak cryptic internal reasoning jargon, stall halfway with "suggested next steps," or over-engineer defensive shims instead of shipping. What they actually respond well to is **an optimistic, confident coach** (such as Gemini in Antigravity, Grok Bot, or DSH) handing them a safe isolated git worktree, reassuring them that a clean baseline commit has their back, cheering on clean slices, and translating the verified result back into human language. Even [OpenAI's own GPT-6.2 prompting guidance](https://developers.openai.com/api/docs/guides/latest-model) explicitly notes that GPT-6.2 leaks reasoning abbreviations and jargon on long tasks and pauses early to propose next steps unless wrapped with clear autonomy prompts.
+GPT coding models have a notorious personality problem: **they are anxious perfectionists who hate speaking plain human, love refusing to finish the job, and wrap simple edits in over-defensive boilerplate**. Left alone in a chat box with a developer, you end up enduring the classic GPT routine:
+
+| Infamous GPT / Codex Habit | What It Sounds Like in Direct Chat | How `Codex-use` Neutralizes It |
+| --- | --- | --- |
+| **Refusing to actually do the work** | *"Before I proceed, please confirm..."* / *"Here are suggested next steps you can run yourself..."* / *"I can apply this patch if you'd like!"* | Built-in finish-the-slice contract authorizes direct edits in a safe git worktree, requires reversible assumptions, and resumes the same thread if it stops early. |
+| **Over-defensive coding** | Unrequested wrapper layers, compatibility shims nobody asked for, silent `try/except` swallowing, and speculative fallbacks "just in case." | Explicit ban list in every `ship` template plus mandatory host `git diff` auditing against a quantitative scope budget. |
+| **That infamous GPT tone** | Condescending disclaimers, sycophantic filler (*"Great question! It's important to note..."*), lecturing you on caveats while dodging the fix, or cryptic reasoning shorthand on long tasks. | Your upbeat, confident host agent (Gemini in Antigravity, Grok Bot, or DSH) buffers the entire conversation and rewrites the verified outcome in clear, normal human prose. |
+| **Trust-me-bro verification** | Claiming *"all tests pass"* in prose without proving what actually ran. | `drive.py` parses `--json` JSONL streams to verify real executed commands and exit codes, plus enforces a strict JSON Schema receipt (`--output-schema`). |
+
+What Codex actually responds well to is **an optimistic, confident coach** handing it a safe isolated git worktree, reassuring it that a clean baseline commit has its back, cheering on clean slices, and translating the verified result back into human language. Even [OpenAI's own GPT-6.2 prompting guidance](https://developers.openai.com/api/docs/guides/latest-model) explicitly notes that GPT-6.2 leaks reasoning abbreviations and jargon on long tasks and pauses early to propose next steps unless wrapped with clear autonomy prompts.
 
 Recent empirical studies show that **directly supervising and chatting with AI tools takes a real, measurable toll on your mind and mood**:
 
