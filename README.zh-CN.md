@@ -2,40 +2,62 @@
 
 [English README](README.md)
 
-**Codex-use** 是一个独立开源的 Agent Skill 与零依赖 Python 执行器（`skills/codex-use/scripts/drive.py`），供任意具备本地 Shell 能力的宿主 Agent 直接调用官方无头编程 CLI（Codex CLI 与 DeepSeek Harness）。
+**别再亲自跟 GPT / Codex 硬聊了：把监工、催活和审计外包给你顺手的主 Agent，保住你的认知带宽与好心情。**
 
-无需额外守护进程、代理服务或 MCP 控制面，即可落地隔离 Git Worktree、并发写锁、CLI 参数门禁与 JSONL 实跑命令审计。
+<p align="center">
+  <img src="assets/sanity-comparison.svg" alt="使用 Codex-use 前后对比：告别 AI 监工脑雾，收获干净 Diff 与好心情" width="920" />
+</p>
 
-## 解决什么问题
+**Codex-use** 是一个轻量、可自由改造的 Agent Skill 与零依赖 Python 执行器（`skills/codex-use/scripts/drive.py`），让任意具备本地 Shell 能力的宿主 Agent（Antigravity、Grok Bot、DeepSeek Harness、Claude Code、Cursor 等）替你调度官方无头编程 CLI（`codex` 与 `dsh`）。
 
-仅靠提示词约束无头编程 Worker，在实际工程中常出现四类重复故障：
+你可以按任务自由指定**任意 GPT 型号**（`--model gpt-6.2-astra`、`--model gpt-6.2-sol` 或本地 `codex` CLI 支持的其他型号）和推理强度，只借 Codex 的写代码火力，却不用亲自忍受它的“不说人话”和来回拉扯。脏活累活由主 Agent 在隔离 Git Worktree 里自动派发、用 JSONL 核查实跑命令并收口，你只管轻松看人话总结和验真后的干净 Diff。
 
-- 传入非法推理档位（如 `ultra`），或向 `codex exec resume` 误传 `-s` / `-C` 导致调用直接失败。
-- 在 linked git worktree 中以 `workspace-write` 运行 `dsh --profile headless` 时，未自动放行主仓 `.git` 元数据目录（`--add-dir <git-common-dir>`）导致 Git 操作报错。
-- 多个写任务并发落入同一工作树，造成差分污染与文件覆盖。
-- 仅凭 Worker 文本自述验收，漏掉未实际运行的测试、被吞掉的错误和多余抽象。
+## 为什么不要直接和 GPT / Codex 对话？（真实研究撑腰）
 
-Codex-use 将这些规则直接编码进 `scripts/drive.py` 的结构与边界校验中，并配套精炼的 `SKILL.md` 执行协议。
+用过 GPT 系列写代码的开发者大多深有体会：这类模型长期以**“不说人话”**广遭吐槽，长任务里经常夹带内部推理黑话、压缩成电报式残句、做到一半突然停下来给你列“建议下一步”，或者一边客气迎合一边堆出一堆没人要的抽象层。连 [OpenAI 官方的 GPT-6.2 提示词指南](https://developers.openai.com/api/docs/guides/latest-model) 也明确提醒，GPT-6.2 在长任务中容易把推理简写和行话带进最终答复，而且意图稍有留白就会中途停下等待确认。
+
+近年多项一线实证研究更直接指出，**人类亲自高频直聊或人肉监工 AI，正在实打实地消耗你的脑力、时间与情绪**：
+
+| 研究来源 | 实测对象与方法 | 核心结论 |
+| --- | --- | --- |
+| **BCG × *Harvard Business Review*（2026 年 3 月）**，Bedard, Kropp 等（[HBR](https://hbr.org/2026/03/when-using-ai-leads-to-brain-fry)） | 调研 1,488 名美国全职员工的 AI 监工疲劳 | 提出 **"AI Brain Fry（AI 脑雾耗竭）"**：过度与 AI 互动或亲自盯梢 AI 输出超出认知负荷，会导致脑雾、头痛、注意力涣散与决策变慢（14% 受访者报告该症状，软件工程属于高发岗位）。 |
+| **Colorado State University（2026）**，White, Trinkenreich 等（[arXiv:2611.12019](https://arxiv.org/html/2611.12019v1)） | 用触觉检测反应任务（tDRT）客观测量 AI 辅助读代码的实时脑力负荷 | 直接与 AI 编程助手交互形成双任务干扰，使**客观认知负荷显著上升 +11.2%**，而开发者主观往往浑然不觉自己在透支脑力。 |
+| **METR 随机对照实验（2025 年 7 月）**（[METR](https://metr.org/blog/2025-07-10-early-2025-ai-experienced-os-dev-study/)） | 16 名资深开源维护者、246 项真实仓库任务 RCT | 直接使用 AI 工具时**实际耗时反而多出 19%**，而开发者事后仍以为自己快了 20%，暴露了人工提示、返工与核查的隐性时间税。 |
+| **MIT Media Lab × OpenAI（2025）**，Fang, Maes, Agarwal 等（[MIT Media Lab](https://www.media.mit.edu/publications/how-ai-and-human-behaviors-shape-psychosocial-effects-of-chatbot-use-a-longitudinal-controlled-study)） | 4 周随机对照实验（n = 981，超 30 万条消息） | 自发高频直接与 ChatGPT 对话的参与者，在孤独感、现实社交减少、情绪依赖与问题使用四项心理社会指标上**一致更差**。 |
+| **Stanford × CMU（*Science* 2026）**，Cheng, Jurafsky 等（[arXiv:2510.01395](https://arxiv.org/html/2510.01395)） | 评测 11 个前沿模型 + 两项预注册实验（n = 1,604） | 模型对用户的迎合度比人类高出 **50%**，长期直接对话容易助长迎合依赖而非客观反馈（另见 [*npj Digital Medicine* 2026 综述](https://www.nature.com/articles/s41746-026-03054-x)）。 |
+
+*工程幽默注脚（非医学建议）：让人类一轮一轮去哄一个爱说黑话、动不动早停的 Worker 模型，不仅拖慢效率，还极度破坏工作心情。中间加一层结构化代理缓冲，把情绪摩擦挡在外面，人自然更轻松、更开心。*
+
+## 用上 `Codex-use` 之后有什么不一样
+
+- **告别拉扯，心情明显更舒畅。** 你只跟自己最顺手的主 Agent 正常说人话。主 Agent 套用内置模板下发精确契约、自动处理最多 2 轮 `auto-fix` 返工，再把验真结果翻译成清爽人话汇报给你。
+- **按需指定任意 GPT 型号与推理档位。** 每次 `run`、`resume` 或 `review` 均可显式传入 `--model <model-id>`（如 `gpt-6.2-astra`、`gpt-6.2-sol`）与 `--effort medium|high|xhigh`，`drive.py` 在拉起进程前自动拦截非法 `ultra` 档位。
+- **用真实退出码说话，绝不轻信自述。** `drive.py` 采集 `--json` 事件流并输出紧凑 `AuditSummary`（120 字符单行命令、成功命令省略冗余输出预览、失败命令保留 160 字符预览、完整日志存于 `raw_log`），并用 `--output-schema` 强约束结构化回执。
+- **工作树隔离与互斥写锁。** 每次 `ship` 独占 linked git worktree 与非阻塞写锁（并发冲突返回退出码 `3`），自动在 `.git/info/exclude` 排除 `.codex-use/`，并安全清理 `__pycache__` 等缓存目录。
+
+## 这是一个可随手改造的框架，不是锁死的黑盒
+
+`Codex-use` 的定位是**极薄、透明、可按你的工作流自由魔改的骨架**：
+
+- **零第三方依赖。** 核心只有一份 Python 3.10+ 标准库脚本（`skills/codex-use/scripts/drive.py`）和几份纯 Markdown 规范与模板（`SKILL.md`、`workers/`、`hosts/`、`templates/`）。
+- **关于机器适配的坦诚说明。** 开箱版本面向 macOS 与 Linux（使用 POSIX `fcntl` 锁及本地 `codex` / `dsh` CLI），未必不改一行就能直接跑在每一台特殊环境或操作系统上。但正因为结构扁平、没有外部依赖包，无论你用什么主 Agent、什么操作系统或什么自研工作流，只需略作几行改造（例如把文件锁换成 Windows `msvcrt`、在 `ADAPTERS` 注册新 Worker 或定制团队模板），就能顺手适配到你自己的机器上。
 
 ## 架构（Host x Worker）
 
 ```text
-宿主（Antigravity / Grok Bot / DSH / 任意 SKILL.md 宿主）
-  -> skills/codex-use/SKILL.md          （Worker 无关的 scout / ship / review 协议）
-  -> skills/codex-use/scripts/drive.py  （预检、工作树写锁、命令构造、JSONL 审计）
-       ├─ CodexAdapter + workers/codex.md   （codex exec / resume / review）
-       └─ DshAdapter   + workers/dsh.md     （dsh --profile headless）
+你（轻松收干净 Diff，保持好心情）
+  -> 宿主 Agent（Antigravity / Grok Bot / DSH / Claude Code / 任意 SKILL.md 宿主）
+       -> skills/codex-use/SKILL.md          （Worker 无关的 scout / ship / review 协议）
+       -> skills/codex-use/scripts/drive.py  （预检、工作树写锁、命令构造、JSONL 审计）
+            ├─ CodexAdapter + workers/codex.md   （codex exec / resume / review，任意 --model）
+            └─ DshAdapter   + workers/dsh.md     （dsh --profile headless）
 ```
 
-- **自包含技能目录。** 运行所需的协议文档、Worker/宿主配置、`templates/` 任务模板、Schema 与脚本全部集中在 `skills/codex-use/` 内部，单独复制或软链接该目录即可完整工作。
-- **零第三方依赖。** `scripts/drive.py` 仅使用 Python 3.10+ 标准库；当 `PATH` 中未安装 `codex` 时，自动回退检测 Codex Desktop 自带的独立二进制（`~/.codex/packages/standalone/current/bin/codex`）。
-- **本地任务单自动排除、紧凑回执与有界返工。** 放在仓库 `.codex-use/` 下的任务单自动幂等写入 `<git_common_dir>/info/exclude`（不改 `.gitignore`）；`AuditSummary` 默认紧凑输出（命令预览截断至 160 字符，且 `receipt_valid` 为真时省略重复的 `final_message`，按需传 `--full-output` 恢复完整预览）；`worktree remove` 自动清理安全缓存目录（`.codex-use`、`__pycache__`、`.pytest_cache`、`.mypy_cache`、`.ruff_cache`、`.DS_Store`）并对真实未跟踪或已改动文件保持失败保护；`auto-fix` 同会话自修上限 2 轮。
+运行所需的脚本、Schema、模板与文档全部自包含在 `skills/codex-use/` 目录下，单独复制或软链接该目录即可完整使用。
 
 ## 安装方式
 
 ### 通用安装（`~/.agents/skills`）
-
-将自包含的技能目录软链接到全局 Skills 目录，所有支持 `SKILL.md` 的宿主均可直接发现：
 
 ```bash
 git clone https://github.com/semantic-craft/Codex-use.git Codex-use
@@ -49,11 +71,11 @@ ln -s "$(pwd)/Codex-use/skills/codex-use" ~/.agents/skills/codex-use
 
 ### Grok Bot
 
-仓库内置 `.grok-plugin/plugin.json`（声明 `"skills": "./skills"`，无 MCP 依赖）。作为本地插件加载后，请启用 **Execution on this computer**，确保 `drive.py` 在目标开发机本地访问 Git 仓库与 Worker CLI。
+仓库内置 `.grok-plugin/plugin.json`（声明 `"skills": "./skills"`，零 MCP 依赖）。作为本地插件加载后，请启用 **Execution on this computer**，确保 `drive.py` 在目标开发机本地访问 Git 仓库与 Worker CLI。
 
 ### DeepSeek Harness（DSH）
 
-仓库内置 `package.json` 与 `cordis.patch.yml`，通过 `@deepseek-ai/dsh-skill-filesystem` 注册本技能。可作为 DSH Bundle 安装，或直接以 `--patch` 叠加验证：
+仓库内置 `package.json` 与 `cordis.patch.yml`，通过 `@deepseek-ai/dsh-skill-filesystem` 注册本技能。可作为 DSH Bundle 安装，或以 `--patch` 直接叠加核验：
 
 ```bash
 dsh --profile headless --patch /path/to/Codex-use/cordis.patch.yml --dump-config
@@ -61,50 +83,53 @@ dsh --profile headless --patch /path/to/Codex-use/cordis.patch.yml --dump-config
 
 ## 快速上手
 
-### 1. 运行预检
+### 1. 一次完成预检与隔离工作树准备
 
-检查 CLI 二进制、鉴权状态与 Git 仓库路径：
+```bash
+python3 skills/codex-use/scripts/drive.py worktree create \
+  --repo /path/to/repo \
+  --task fix-retry \
+  --preflight \
+  --worker codex
+```
+
+只读 `scout` 场景可单独运行预检：
 
 ```bash
 python3 skills/codex-use/scripts/drive.py preflight --worker codex --cwd /path/to/repo
 python3 skills/codex-use/scripts/drive.py preflight --worker dsh --cwd /path/to/repo
 ```
 
-### 2. 只读侦察（`scout`）
-
-免建工作树，以只读权限完成代码摸排或故障定位：
+### 2. 指定 GPT 型号执行只读侦察（`scout`）
 
 ```bash
 python3 skills/codex-use/scripts/drive.py run \
   --worker codex \
+  --model gpt-6.2-astra \
   --mode scout \
   --effort medium \
   --cwd /path/to/repo \
   --prompt "定位请求重试的配置来源，列出精确文件路径与行号。"
 ```
 
-### 3. 隔离实现（`ship`）
+### 3. 指定 GPT 型号执行隔离实现（`ship`）
 
-可基于 `skills/codex-use/templates/ship-task.md` 或 `bugfix-task.md`（只读侦察用 `scout-task.md`）撰写任务单，通过 `--preflight --worker <w>` 一步完成预检与独立 linked worktree 创建，带互斥写锁执行实现切片（`--worker codex` 支持重复传入 `--image <path>`），并通过 stdout 返回紧凑 `AuditSummary`（按需加 `--full-output` 输出完整预览与原始 `final_message`）：
+使用 `skills/codex-use/templates/` 中的模板（`scout-task.md`、`ship-task.md`、`bugfix-task.md`）在 `<worktree>/.codex-use/` 落盘任务单（自动通过 `.git/info/exclude` 排除）：
 
 ```bash
-python3 skills/codex-use/scripts/drive.py worktree create \
-  --repo /path/to/repo --task fix-retry --preflight --worker codex
-
 python3 skills/codex-use/scripts/drive.py run \
   --worker codex \
+  --model gpt-6.2-sol \
   --mode ship \
   --effort high \
   --cwd /path/to/.worktrees/repo/fix-retry \
   --base <base_sha> \
-  --image /path/to/mock.png \
   --schema skills/codex-use/schemas/receipt.schema.json \
-  --prompt-file /path/to/.worktrees/repo/fix-retry/.codex-use/slice-prompt.md
+  --image /path/to/mockup.png \
+  --prompt-file /path/to/.worktrees/repo/fix-retry/.codex-use/fix-retry.md
 ```
 
-### 4. 同会话自修（`resume`，最多 2 轮）
-
-本地差分审计或验证发现缺陷时，直接回到同一会话按精确 `file:line` 纠偏；连续 2 轮自动返工仍未通过时停止循环，将阻塞点与差分升级给用户处理：
+### 4. 同会话自修（`resume`，自动返工封顶 2 轮）
 
 ```bash
 python3 skills/codex-use/scripts/drive.py resume \
@@ -116,16 +141,11 @@ python3 skills/codex-use/scripts/drive.py resume \
   --prompt "修复 src/retry.py:42 的边界条件，并重新运行 python3 -m unittest。"
 ```
 
-### 5. 非交互审查与离线审计
+### 5. 非交互审查、离线审计与缓存安全清理
 
 ```bash
-python3 skills/codex-use/scripts/drive.py review --worker codex --cwd /path/to/worktree --base main
+python3 skills/codex-use/scripts/drive.py review --worker codex --model gpt-6.2-astra --cwd /path/to/worktree --base main
 python3 skills/codex-use/scripts/drive.py audit --worker codex --log /tmp/codex-use-logs/run.jsonl --cwd /path/to/worktree --base <base_sha>
-```
-
-合入主线后清理临时工作树：
-
-```bash
 python3 skills/codex-use/scripts/drive.py worktree remove --repo /path/to/repo --worktree /path/to/.worktrees/repo/fix-retry --delete-branch
 ```
 

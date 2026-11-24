@@ -15,9 +15,9 @@ Invoke [`scripts/drive.py`](scripts/drive.py) strictly as a black-box CLI. Never
 | --- | --- | --- |
 | `preflight` | `--worker <codex\|dsh> --cwd <repo>` | Standalone check (`scout`). |
 | `worktree create` | `--repo <r> --task <slug> --preflight --worker <w> [--base <ref>]` | Preflights first, creates linked worktree + `base_sha`, auto-excludes `.codex-use/`. |
-| `run` | `--worker <w> --mode <scout\|ship> --cwd <d> --prompt-file <f> [--effort medium\|high\|xhigh] [--schema <s>] [--image <p>...] [--base <sha>] [--full-output]` | Returns compact `AuditSummary` (120-char single-line commands; omits `output_preview` on `exit_code == 0` and duplicate `final_message` when `receipt_valid` is true; 160-char failure previews; verbatim stream in `raw_log` and `--full-output`). |
+| `run` | `--worker <w> --mode <scout\|ship> --cwd <d> --prompt-file <f> [--model <id>] [--effort medium\|high\|xhigh] [--schema <s>] [--image <p>...] [--base <sha>] [--full-output]` | Returns compact `AuditSummary` (120-char single-line commands; omits `output_preview` on `exit_code == 0` and duplicate `final_message` when `receipt_valid` is true; 160-char failure previews; verbatim stream in `raw_log` and `--full-output`). |
 | `resume` | `--session <id>` + same flags as `run` | Continues same thread under exclusive `ship` lock. |
-| `review` | `--worker codex --cwd <d> [--base <br> \| --uncommitted \| --commit <sha>] [--prompt-file <f>] [--full-output]` | Non-interactive diff review (`dsh` exits `1`). |
+| `review` | `--worker codex --cwd <d> [--model <id>] [--base <br> \| --uncommitted \| --commit <sha>] [--prompt-file <f>] [--full-output]` | Non-interactive diff review (`dsh` exits `1`). |
 | `audit` | `--worker <w> --log <jsonl> [--cwd <d>] [--base <sha>] [--full-output]` | Re-parses JSONL into `AuditSummary`. |
 | `worktree remove` | `--repo <r> --worktree <wt> [--delete-branch] [--force]` | Auto-cleans safe caches (`.codex-use`, `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.DS_Store`) and prunes empty `.worktrees` dirs; fails closed on real untracked/modified files. |
 

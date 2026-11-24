@@ -2,34 +2,58 @@
 
 [中文文档](README.zh-CN.md)
 
-**Codex-use** is a standalone open-source agent skill and zero-dependency Python runner (`skills/codex-use/scripts/drive.py`) for driving official headless coding CLIs from any shell-capable agent host.
+**Stop arguing with GPT and Codex directly. Protect your cognitive bandwidth, keep your good mood, and let your favorite host agent babysit the worker.**
 
-It enforces isolated git worktrees, concurrency locking, worker-specific CLI safety checks, and real-command JSONL auditing without requiring a custom daemon, proxy server, or MCP control plane.
+<p align="center">
+  <img src="assets/sanity-comparison.svg" alt="Before and after Codex-use: less cognitive fatigue, cleaner diffs, better mood" width="920" />
+</p>
 
-## Why Codex-use
+**Codex-use** is a lightweight, hackable agent skill and zero-dependency Python runner (`skills/codex-use/scripts/drive.py`) that puts any shell-capable host agent (Antigravity, Grok Bot, DeepSeek Harness, Claude Code, Cursor, or your own setup) in front of official headless coding CLIs (`codex` and `dsh`).
 
-Delegating coding slices to a headless CLI fails in predictable ways when left to prose instructions alone:
+You keep Codex's raw coding muscle and pick **any GPT model you want** (`--model gpt-6.2-astra`, `--model gpt-6.2-sol`, or any model your local `codex` CLI supports), while your host agent absorbs the prompt wrangling, isolated git worktrees, JSONL real-command auditing, and rework loops. You read clean human prose and verified diffs instead of fighting a chat window.
 
-- Passing invalid reasoning effort values (such as `ultra`) or passing `-s`/`-C` to `codex exec resume` causes runtime failures.
-- Running `dsh --profile headless --permission-mode workspace-write` inside a linked git worktree breaks `git` commands unless `--add-dir <git-common-dir>` is passed.
-- Launching two concurrent edits in the same worktree corrupts diffs.
-- Trusting a worker's prose summary misses skipped tests, swallowed errors, and unrequested abstractions.
+## Why Not Talk to GPT / Codex Directly? (Backed by Real Studies)
 
-Codex-use encodes these guardrails directly in `scripts/drive.py` and pairs them with a concise `SKILL.md` workflow.
+GPT coding models are notoriously criticized for **"not speaking like a human"** on long engineering tasks: leaking internal reasoning shorthand, collapsing into cryptic telegraphic jargon, pausing halfway with "suggested next steps," or swinging between sycophantic agreement and over-engineered diffs. Even [OpenAI's own GPT-6.2 prompting guidance](https://developers.openai.com/api/docs/guides/latest-model) explicitly notes that GPT-6.2 leaks reasoning abbreviations and jargon on long tasks and stops early to propose next steps unless carefully wrapped with structured prompts.
+
+Recent empirical studies show that **directly supervising and chatting with AI tools takes a real, measurable toll on your mind and mood**:
+
+| Study | What it measured | Key finding |
+| --- | --- | --- |
+| **BCG x *Harvard Business Review* (Mar 2026)**, Bedard, Kropp et al. ([HBR](https://hbr.org/2026/03/when-using-ai-leads-to-brain-fry)) | Survey of 1,488 full-time US workers on AI oversight fatigue | Coined **"AI brain fry"**: excessive direct interaction with or oversight of AI tools triggers mental fog, headaches, slower decisions, and focus loss (reported by 14% of AI users, elevated in software engineering). |
+| **Colorado State University (2026)**, White, Trinkenreich et al. ([arXiv:2611.12019](https://arxiv.org/html/2611.12019v1)) | Objective real-time cognitive workload (tDRT) during AI-assisted code reading | Direct AI interaction created a dual-task penalty that raised **objective cognitive load by +11.2%**, even while developers felt their workload was unchanged. |
+| **METR Randomized Controlled Trial (Jul 2025)** ([METR](https://metr.org/blog/2025-07-10-early-2025-ai-experienced-os-dev-study/)) | 16 experienced open-source maintainers across 246 real repository issues | Direct AI tool usage made tasks take **19% longer** on average, even though developers believed they were 20% faster, exposing the hidden tax of manual prompting and rework. |
+| **MIT Media Lab x OpenAI (2025)**, Fang, Maes, Agarwal et al. ([MIT Media Lab](https://www.media.mit.edu/publications/how-ai-and-human-behaviors-shape-psychosocial-effects-of-chatbot-use-a-longitudinal-controlled-study)) | 4-week RCT (n = 981, >300k messages) on extended ChatGPT use | Higher voluntary direct chatbot usage consistently correlated with worse psychosocial outcomes across loneliness, reduced real-world socialization, emotional dependence, and problematic use. |
+| **Stanford x CMU (*Science* 2026)**, Cheng, Jurafsky et al. ([arXiv:2510.01395](https://arxiv.org/html/2510.01395)) | 11 frontier LLMs + two preregistered studies (n = 1,604) on sycophancy | Models affirmed users **50% more than humans**, promoting unhealthy dependence rather than grounded feedback (see also the [*npj Digital Medicine* 2026 scoping review](https://www.nature.com/articles/s41746-026-03054-x)). |
+
+*Engineering note, not medical advice: the point is simple. Humans are bad at babysitting verbose, quirky worker models turn by turn, and it ruins your mood. Put a structured buffer agent in the middle so your brain stays clear and your workday feels lighter.*
+
+## What Changes When You Use `Codex-use`
+
+- **Better mood, zero direct Codex wrangling.** Talk normally to the host agent you actually enjoy using. It writes structured briefs from built-in templates, handles up to 2 automatic `auto-fix` resume rounds, and reports back in clear human prose.
+- **Pick any GPT model and effort tier per task.** Pass `--model <model-id>` (such as `gpt-6.2-astra` or `gpt-6.2-sol`) and `--effort medium|high|xhigh` on every `run`, `resume`, or `review` call. `drive.py` blocks unsupported `ultra` before spawning.
+- **No more trusting prose claims.** `drive.py` captures `--json` event streams and returns a compact `AuditSummary` listing real executed commands, real exit codes, changed files, and strict JSON Schema receipts (`--output-schema`).
+- **Isolated git worktrees and write locks.** Every `ship` slice runs in its own linked git worktree protected by an exclusive file lock (`exit code 3` on collision), with automatic `.git/info/exclude` hygiene for `.codex-use/` and cache-safe cleanup.
+
+## A Hackable Framework, Not a Rigid Black Box
+
+`Codex-use` is intentionally built as a **small, readable workflow framework** that any agent can adopt and customize:
+
+- **One zero-dependency Python 3.10+ script (`skills/codex-use/scripts/drive.py`)** plus plain Markdown rules (`SKILL.md`, `workers/`, `hosts/`, `templates/`).
+- **Honest machine compatibility note.** Out of the box, `drive.py` targets macOS and Linux (using POSIX `fcntl` file locks and local `codex` / `dsh` CLIs) and will not match every workstation or OS verbatim. Because the codebase is flat and has zero third-party packages, a light edit (for example swapping `fcntl` for `msvcrt` on Windows, adding a custom worker adapter to `ADAPTERS`, or tuning the templates to your team's checks) adapts it cleanly to almost any machine or agent workflow.
 
 ## Architecture (Host x Worker)
 
 ```text
-Host (Antigravity / Grok Bot / DSH / any SKILL.md agent)
-  -> skills/codex-use/SKILL.md          (worker-agnostic scout/ship/review protocol)
-  -> skills/codex-use/scripts/drive.py  (preflight, worktree lock, CLI builder, JSONL auditor)
-       ├─ CodexAdapter + workers/codex.md   (codex exec / resume / review)
-       └─ DshAdapter   + workers/dsh.md     (dsh --profile headless)
+You (calm & happy)
+  -> Host Agent (Antigravity / Grok Bot / DSH / Claude Code / any SKILL.md agent)
+       -> skills/codex-use/SKILL.md          (worker-agnostic scout / ship / review protocol)
+       -> skills/codex-use/scripts/drive.py  (preflight, worktree lock, CLI builder, JSONL auditor)
+            ├─ CodexAdapter + workers/codex.md   (codex exec / resume / review, any --model)
+            └─ DshAdapter   + workers/dsh.md     (dsh --profile headless)
 ```
 
-- **Self-contained skill folder.** Everything needed at runtime lives inside `skills/codex-use/` (protocol, worker/host profiles, task templates under `templates/`, receipt schema, and `scripts/drive.py`). Copying or symlinking that directory alone preserves all relative links and scripts.
-- **Zero third-party dependencies.** `scripts/drive.py` uses Python 3.10+ standard library modules only, and falls back to Codex Desktop's standalone binary (`~/.codex/packages/standalone/current/bin/codex`) when `codex` is not on `PATH`.
-- **Clean local specs, compact audits, and bounded retries.** Task specs under `.codex-use/` are auto-excluded in `<git_common_dir>/info/exclude` (never modifying `.gitignore`). `AuditSummary` stdout defaults to compact mode (160-char previews, omitting duplicate `final_message` when `receipt_valid` is true; pass `--full-output` for verbose previews and raw `final_message`). `worktree remove` auto-cleans safe disposable caches (`.codex-use`, `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.DS_Store`) while failing closed on real untracked or modified files. Automatic `auto-fix` resumes cap at 2 rounds before escalating to the user.
+Everything required at runtime lives inside `skills/codex-use/`. Copying or symlinking that single folder preserves every script, schema, template, and relative link.
 
 ## Installation
 
@@ -45,15 +69,15 @@ ln -s "$(pwd)/Codex-use/skills/codex-use" ~/.agents/skills/codex-use
 
 ### Antigravity
 
-The repository ships a root `plugin.json` manifest targeting Antigravity. Clone the repository into your Antigravity plugins directory (or symlink `skills/codex-use` into `~/.agents/skills/codex-use`).
+The repository ships a root `plugin.json` manifest targeting Antigravity. Clone the repository into your Antigravity plugins directory, or symlink `skills/codex-use` into `~/.agents/skills/codex-use`.
 
 ### Grok Bot
 
-The repository ships `.grok-plugin/plugin.json` pointing `skills` to `./skills` with zero MCP servers required. Install the repository as a local Grok Bot plugin and enable **Execution on this computer** so `drive.py` accesses your local git repository and worker binaries.
+The repository ships `.grok-plugin/plugin.json` pointing `skills` to `./skills` with zero MCP servers required. Install the repository as a local Grok Bot plugin and enable **Execution on this computer** so `drive.py` reaches your local git repo and worker CLIs.
 
 ### DeepSeek Harness (DSH)
 
-The repository ships `package.json` and `cordis.patch.yml` registering `@deepseek-ai/dsh-skill-filesystem`. Install it as a DSH plugin bundle or overlay it directly:
+The repository ships `package.json` and `cordis.patch.yml` registering `@deepseek-ai/dsh-skill-filesystem`. Install it as a DSH bundle or verify the overlay directly:
 
 ```bash
 dsh --profile headless --patch /path/to/Codex-use/cordis.patch.yml --dump-config
@@ -61,50 +85,53 @@ dsh --profile headless --patch /path/to/Codex-use/cordis.patch.yml --dump-config
 
 ## Quickstart
 
-### 1. Preflight check
+### 1. Preflight + isolated worktree in one command
 
-Verify binary availability, credentials, and repository status:
+```bash
+python3 skills/codex-use/scripts/drive.py worktree create \
+  --repo /path/to/repo \
+  --task fix-retry \
+  --preflight \
+  --worker codex
+```
+
+Standalone preflight for read-only `scout` runs:
 
 ```bash
 python3 skills/codex-use/scripts/drive.py preflight --worker codex --cwd /path/to/repo
 python3 skills/codex-use/scripts/drive.py preflight --worker dsh --cwd /path/to/repo
 ```
 
-### 2. Read-only `scout`
-
-Investigate a codebase without editing files or creating a worktree:
+### 2. Read-only `scout` with an explicit GPT model
 
 ```bash
 python3 skills/codex-use/scripts/drive.py run \
   --worker codex \
+  --model gpt-6.2-astra \
   --mode scout \
   --effort medium \
   --cwd /path/to/repo \
   --prompt "Trace how request retries are configured and list the exact files and lines."
 ```
 
-### 3. Isolated `ship`
+### 3. Isolated `ship` with strict receipt schema and optional screenshot
 
-Start from `skills/codex-use/templates/ship-task.md` or `skills/codex-use/templates/bugfix-task.md` (use `templates/scout-task.md` for `scout`), combine preflight and linked worktree creation in one command, run a scoped change with exclusive lock protection (optionally passing repeatable `--image <path>` flags on `--worker codex`), and inspect the compact `AuditSummary` returned on stdout (add `--full-output` if you want 400-char previews and unelided `final_message`):
+Draft the brief from `skills/codex-use/templates/` (`scout-task.md`, `ship-task.md`, or `bugfix-task.md`) under `<worktree>/.codex-use/` (auto-excluded via `.git/info/exclude`):
 
 ```bash
-python3 skills/codex-use/scripts/drive.py worktree create \
-  --repo /path/to/repo --task fix-retry --preflight --worker codex
-
 python3 skills/codex-use/scripts/drive.py run \
   --worker codex \
+  --model gpt-6.2-sol \
   --mode ship \
   --effort high \
   --cwd /path/to/.worktrees/repo/fix-retry \
   --base <base_sha> \
-  --image /path/to/mock.png \
   --schema skills/codex-use/schemas/receipt.schema.json \
-  --prompt-file /path/to/.worktrees/repo/fix-retry/.codex-use/slice-prompt.md
+  --image /path/to/mockup.png \
+  --prompt-file /path/to/.worktrees/repo/fix-retry/.codex-use/fix-retry.md
 ```
 
 ### 4. Same-thread `resume` (`auto-fix`, max 2 rounds)
-
-Continue an existing session when local diff audit or verification finds issues (halt and escalate to the user if checks still fail after 2 rework rounds):
 
 ```bash
 python3 skills/codex-use/scripts/drive.py resume \
@@ -116,16 +143,11 @@ python3 skills/codex-use/scripts/drive.py resume \
   --prompt "Fix the off-by-one guard in src/retry.py:42 and re-run python3 -m unittest."
 ```
 
-### 5. Non-interactive `review` and log `audit`
+### 5. Non-interactive `review`, log `audit`, and cache-safe cleanup
 
 ```bash
-python3 skills/codex-use/scripts/drive.py review --worker codex --cwd /path/to/worktree --base main
+python3 skills/codex-use/scripts/drive.py review --worker codex --model gpt-6.2-astra --cwd /path/to/worktree --base main
 python3 skills/codex-use/scripts/drive.py audit --worker codex --log /tmp/codex-use-logs/run.jsonl --cwd /path/to/worktree --base <base_sha>
-```
-
-Remove the worktree once changes are merged:
-
-```bash
 python3 skills/codex-use/scripts/drive.py worktree remove --repo /path/to/repo --worktree /path/to/.worktrees/repo/fix-retry --delete-branch
 ```
 
