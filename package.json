@@ -1,7 +1,7 @@
 {
   "name": "codex-use",
   "version": "0.1.0",
-  "description": "Standalone open-source skill and zero-dependency runner for driving Codex CLI and DeepSeek Harness in isolated git worktrees with real-command JSONL verification.",
+  "description": "Standalone agent skill and zero-dependency runner for Antigravity, DeepSeek Harness (DSH), and Grok Bot to drive Codex CLI in isolated git worktrees with real-command JSONL verification.",
   "license": "MIT",
   "keywords": [
     "codex",
