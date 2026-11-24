@@ -1,190 +1,211 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 460" role="img" aria-labelledby="title desc">
-  <title id="title">Codex-use: Anxious Direct Codex Chat vs Upbeat Host-Coached Workflow</title>
-  <desc id="desc">Animated comparison showing a hesitant, mistake-averse Codex stalling in direct human chat versus an upbeat, confident host agent like Gemini encouraging Codex inside an isolated git worktree with JSONL verification, leaving the human calm and happy.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 470" role="img" aria-labelledby="title desc">
+  <title id="title">Codex-use: Anxious Direct GPT Chat vs Upbeat Host-Coached Workflow</title>
+  <desc id="desc">Animated Spaceman-inspired comparison showing a nervous, mistake-averse Codex robot stalling in direct chat versus an optimistic Gemini coach robot encouraging Codex inside an isolated git worktree with JSONL verification.</desc>
   <defs>
     <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#0b1120"/>
-      <stop offset="100%" stop-color="#172033"/>
+      <stop offset="0%" stop-color="#0d1021"/>
+      <stop offset="100%" stop-color="#171b34"/>
     </linearGradient>
     <linearGradient id="leftCard" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#2a1622"/>
-      <stop offset="100%" stop-color="#191320"/>
+      <stop offset="0%" stop-color="#26162b"/>
+      <stop offset="100%" stop-color="#181224"/>
     </linearGradient>
     <linearGradient id="rightCard" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#10292b"/>
-      <stop offset="100%" stop-color="#111d29"/>
+      <stop offset="0%" stop-color="#16223d"/>
+      <stop offset="100%" stop-color="#111a2e"/>
     </linearGradient>
-    <linearGradient id="geminiGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+    <linearGradient id="squircleWarn" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#8b5cf6"/>
+      <stop offset="100%" stop-color="#ec4899"/>
+    </linearGradient>
+    <linearGradient id="squircleGemini" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#60a5fa"/>
-      <stop offset="50%" stop-color="#a78bfa"/>
-      <stop offset="100%" stop-color="#34d399"/>
+      <stop offset="50%" stop-color="#7c6cf6"/>
+      <stop offset="100%" stop-color="#9b6bff"/>
     </linearGradient>
+    <linearGradient id="squircleCodexOk" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6366f1"/>
+      <stop offset="100%" stop-color="#10b981"/>
+    </linearGradient>
+    <linearGradient id="helmetWhite" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#dbe4ff"/>
+    </linearGradient>
+    <linearGradient id="wordGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#7aa2ff"/>
+      <stop offset="100%" stop-color="#b794ff"/>
+    </linearGradient>
+    <pattern id="scanlines" width="4" height="4" patternUnits="userSpaceOnUse">
+      <rect width="4" height="2.2" fill="#38e8ff"/>
+      <rect y="2.2" width="4" height="1.8" fill="#132238" fill-opacity="0.7"/>
+    </pattern>
+    <pattern id="scanlinesWarn" width="4" height="4" patternUnits="userSpaceOnUse">
+      <rect width="4" height="2.2" fill="#fb7185"/>
+      <rect y="2.2" width="4" height="1.8" fill="#231222" fill-opacity="0.7"/>
+    </pattern>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#050814" flood-opacity="0.45"/>
+    </filter>
     <style>
-      .title { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; font-weight: 700; }
-      .body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; }
+      .title { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Helvetica, Arial, sans-serif; font-weight: 700; }
+      .body { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Helvetica, Arial, sans-serif; }
       .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
 
       @keyframes shiver {
         0%, 100% { transform: translate(0px, 0px); }
-        25% { transform: translate(-1.5px, 0.5px); }
-        50% { transform: translate(1.5px, -0.5px); }
+        25% { transform: translate(-1.6px, 0.5px); }
+        50% { transform: translate(1.6px, -0.5px); }
         75% { transform: translate(-1px, 0px); }
       }
       @keyframes sweatDrop {
-        0%, 100% { transform: translateY(0px); opacity: 0.9; }
-        70% { transform: translateY(6px); opacity: 0.25; }
+        0%, 100% { transform: translateY(0px); opacity: 0.95; }
+        70% { transform: translateY(7px); opacity: 0.2; }
       }
       @keyframes warnPulse {
-        0%, 100% { opacity: 0.45; }
+        0%, 100% { opacity: 0.4; }
         50% { opacity: 1; }
       }
-      @keyframes coachGlow {
-        0%, 100% { opacity: 0.35; transform: scale(1); }
-        50% { opacity: 0.75; transform: scale(1.06); }
+      @keyframes floatSoft {
+        0%, 100% { transform: translateY(0px); }
+        50% { transform: translateY(-3.5px); }
       }
-      @keyframes flowDash {
+      @keyframes flowBeam {
         from { stroke-dashoffset: 24; }
         to { stroke-dashoffset: 0; }
       }
-      @keyframes sparkle {
+      @keyframes twinkle {
         0%, 100% { opacity: 0.35; transform: scale(0.85); }
-        50% { opacity: 1; transform: scale(1.15); }
+        50% { opacity: 1; transform: scale(1.2); }
       }
-      @keyframes gentleBounce {
-        0%, 100% { transform: translateY(0px); }
-        50% { transform: translateY(-3px); }
-      }
-      @keyframes checkPop {
-        0%, 100% { opacity: 0.75; }
-        50% { opacity: 1; }
-      }
-
-      .shiver { animation: shiver 0.7s ease-in-out infinite; }
-      .sweat { animation: sweatDrop 1.8s ease-in-out infinite; }
-      .warn { animation: warnPulse 1.6s ease-in-out infinite; }
-      .glow { transform-box: fill-box; transform-origin: center; animation: coachGlow 2.4s ease-in-out infinite; }
-      .flow { stroke-dasharray: 6 6; animation: flowDash 1.1s linear infinite; }
-      .spark1 { transform-box: fill-box; transform-origin: center; animation: sparkle 1.8s ease-in-out infinite; }
-      .spark2 { transform-box: fill-box; transform-origin: center; animation: sparkle 1.8s ease-in-out 0.9s infinite; }
-      .bounce { animation: gentleBounce 2.6s ease-in-out infinite; }
-      .check { animation: checkPop 2s ease-in-out infinite; }
+      .shiver { animation: shiver 0.65s ease-in-out infinite; }
+      .sweat { animation: sweatDrop 1.7s ease-in-out infinite; }
+      .warn { animation: warnPulse 1.5s ease-in-out infinite; }
+      .float { animation: floatSoft 2.5s ease-in-out infinite; }
+      .beam { stroke-dasharray: 6 6; animation: flowBeam 1s linear infinite; }
+      .star1 { transform-box: fill-box; transform-origin: center; animation: twinkle 1.7s ease-in-out infinite; }
+      .star2 { transform-box: fill-box; transform-origin: center; animation: twinkle 1.7s ease-in-out 0.85s infinite; }
     </style>
   </defs>
 
-  <rect width="960" height="460" rx="18" fill="url(#bg)"/>
+  <rect width="960" height="470" rx="20" fill="url(#bg)"/>
 
   <!-- Header -->
-  <text x="480" y="38" text-anchor="middle" fill="#f8fafc" class="title" font-size="20">
-    Anxious Worker Meets an Optimistic Coach
+  <text x="480" y="39" text-anchor="middle" fill="url(#wordGrad)" class="title" font-size="21">
+    Anxious Perfectionist Bot Meets an Optimistic Coach
   </text>
-  <text x="480" y="60" text-anchor="middle" fill="#94a3b8" class="body" font-size="13">
-    Let a confident host agent (Gemini / Antigravity / Grok / DSH) cheer on Codex so you stay sane and happy
+  <text x="480" y="61" text-anchor="middle" fill="#9aa8cc" class="body" font-size="13">
+    Pair a shy, mistake-averse Codex worker with an upbeat host agent (Gemini / Antigravity / Grok / DSH)
   </text>
 
   <!-- ==================== LEFT PANEL: BEFORE ==================== -->
-  <rect x="28" y="80" width="436" height="352" rx="14" fill="url(#leftCard)" stroke="#f43f5e" stroke-opacity="0.45" stroke-width="1.5"/>
-  <rect x="46" y="96" width="174" height="26" rx="13" fill="#f43f5e" fill-opacity="0.18"/>
-  <text x="133" y="113" text-anchor="middle" fill="#fda4af" class="title" font-size="11.5">BEFORE · DIRECT GPT CHAT</text>
+  <rect x="28" y="82" width="436" height="360" rx="16" fill="url(#leftCard)" stroke="#f43f5e" stroke-opacity="0.4" stroke-width="1.5"/>
+  <rect x="46" y="98" width="180" height="26" rx="13" fill="#f43f5e" fill-opacity="0.18"/>
+  <text x="136" y="115" text-anchor="middle" fill="#fda4af" class="title" font-size="11.5">BEFORE · DIRECT GPT CHAT</text>
 
-  <!-- Anxious Codex bot (shivering in corner) -->
+  <!-- Anxious Spaceman-style Codex Squircle -->
   <g class="shiver">
-    <rect x="54" y="142" width="152" height="104" rx="12" fill="#231623" stroke="#fb7185" stroke-opacity="0.5" stroke-width="1.2"/>
+    <rect x="52" y="142" width="156" height="114" rx="14" fill="#211428" stroke="#fb7185" stroke-opacity="0.45" stroke-width="1.2"/>
     <text x="130" y="160" text-anchor="middle" fill="#fda4af" class="title" font-size="11">Codex / GPT</text>
-    <text x="130" y="174" text-anchor="middle" fill="#94a3b8" class="body" font-size="10">Shy · Fearful of mistakes</text>
-    <!-- Nervous bot face -->
-    <rect x="106" y="184" width="48" height="38" rx="9" fill="#331c2b" stroke="#fb7185" stroke-width="1.6"/>
-    <circle cx="121" cy="199" r="3" fill="#fecdd3"/>
-    <circle cx="139" cy="199" r="3" fill="#fecdd3"/>
-    <path d="M119 212 Q125 208 130 212 Q135 208 141 212" fill="none" stroke="#fda4af" stroke-width="1.8" stroke-linecap="round"/>
+    <!-- Squircle Icon -->
+    <rect x="102" y="169" width="56" height="56" rx="14" fill="url(#squircleWarn)" filter="url(#softShadow)"/>
+    <!-- Side pods -->
+    <rect x="103" y="191" width="6" height="12" rx="3" fill="#e2e8f0"/>
+    <rect x="151" y="191" width="6" height="12" rx="3" fill="#e2e8f0"/>
+    <!-- Helmet -->
+    <rect x="108" y="177" width="44" height="40" rx="14" fill="url(#helmetWhite)"/>
+    <!-- Visor -->
+    <rect x="114" y="183" width="32" height="28" rx="9" fill="#171426"/>
+    <!-- Nervous scanline eyes -->
+    <rect x="120" y="191" width="7" height="11" rx="3.5" fill="url(#scanlinesWarn)"/>
+    <rect x="133" y="191" width="7" height="11" rx="3.5" fill="url(#scanlinesWarn)"/>
     <!-- Sweat drop -->
-    <path class="sweat" d="M159 186 C159 186 164 193 164 196 C164 199 161.8 201 159 201 C156.2 201 154 199 154 196 C154 193 159 186 159 186 Z" fill="#38bdf8"/>
-    <text x="130" y="236" text-anchor="middle" fill="#fecdd3" class="mono" font-size="9.5">"May break something..."</text>
+    <path class="sweat" d="M161 174 C161 174 166 181 166 184.5 C166 187.3 163.8 189.5 161 189.5 C158.2 189.5 156 187.3 156 184.5 C156 181 161 174 161 174 Z" fill="#38e8ff"/>
+    <text x="130" y="245" text-anchor="middle" fill="#fecdd3" class="mono" font-size="9.5">"Please confirm first..."</text>
   </g>
 
-  <!-- Friction arrows between Codex and Human -->
-  <text x="246" y="185" text-anchor="middle" fill="#fb7185" class="title" font-size="18">⇄</text>
-  <text x="246" y="203" text-anchor="middle" fill="#fda4af" class="body" font-size="10">Endless</text>
-  <text x="246" y="216" text-anchor="middle" fill="#fda4af" class="body" font-size="10">tug-of-war</text>
+  <!-- Friction -->
+  <text x="246" y="191" text-anchor="middle" fill="#fb7185" class="title" font-size="18">⇄</text>
+  <text x="246" y="209" text-anchor="middle" fill="#fda4af" class="body" font-size="10">Endless</text>
+  <text x="246" y="222" text-anchor="middle" fill="#fda4af" class="body" font-size="10">tug-of-war</text>
 
   <!-- Stressed Human -->
-  <rect x="286" y="142" width="158" height="104" rx="12" fill="#231623" stroke="#f59e0b" stroke-opacity="0.45" stroke-width="1.2"/>
-  <text x="365" y="160" text-anchor="middle" fill="#fcd34d" class="title" font-size="11">You (Human)</text>
-  <text x="365" y="174" text-anchor="middle" fill="#94a3b8" class="body" font-size="10">Babysitting every turn</text>
-  <!-- Stressed face + lightning -->
-  <circle cx="365" cy="203" r="20" fill="#3b1d28" stroke="#fb7185" stroke-width="1.8"/>
-  <path d="M356 198 L361 201 M361 198 L356 201 M369 198 L374 201 M374 198 L369 201" stroke="#fda4af" stroke-width="1.7" stroke-linecap="round"/>
-  <path d="M357 212 Q365 206 373 212" fill="none" stroke="#fda4af" stroke-width="1.9" stroke-linecap="round"/>
-  <path class="warn" d="M393 185 L387 195 L393 195 L388 205" fill="none" stroke="#fbbf24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-  <text x="365" y="236" text-anchor="middle" fill="#fde68a" class="mono" font-size="9.5">"Just finish the fix!"</text>
+  <rect x="284" y="142" width="160" height="114" rx="14" fill="#211428" stroke="#f59e0b" stroke-opacity="0.45" stroke-width="1.2"/>
+  <text x="364" y="160" text-anchor="middle" fill="#fcd34d" class="title" font-size="11">You (Human)</text>
+  <circle cx="364" cy="197" r="24" fill="#361a2a" stroke="#fb7185" stroke-width="2" filter="url(#softShadow)"/>
+  <path d="M353 191 L359 195 M359 191 L353 195 M369 191 L375 195 M375 191 L369 195" stroke="#fda4af" stroke-width="2" stroke-linecap="round"/>
+  <path d="M354 209 Q364 201 374 209" fill="none" stroke="#fda4af" stroke-width="2" stroke-linecap="round"/>
+  <path class="warn" d="M396 177 L389 189 L396 189 L390 201" fill="none" stroke="#fbbf24" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="364" y="245" text-anchor="middle" fill="#fde68a" class="mono" font-size="9.5">"Just run the tests!"</text>
 
-  <!-- Cryptic bubble log -->
-  <rect x="48" y="262" width="396" height="84" rx="10" fill="#251722" stroke="#f43f5e" stroke-opacity="0.35" stroke-width="1"/>
-  <text x="64" y="283" fill="#fecdd3" class="mono" font-size="11">• "Suggested next steps: you can run pytest..."</text>
-  <text x="64" y="303" fill="#fecdd3" class="mono" font-size="11">• Cryptic reasoning shorthand &amp; hesitant hedging</text>
-  <text x="64" y="323" fill="#fecdd3" class="mono" font-size="11">• Defensive shims + dirty tree + unverified prose</text>
+  <!-- Failure list -->
+  <rect x="48" y="270" width="396" height="86" rx="10" fill="#231626" stroke="#f43f5e" stroke-opacity="0.32" stroke-width="1"/>
+  <text x="64" y="292" fill="#fecdd3" class="mono" font-size="11">• Refuses to act: "Here are suggested next steps..."</text>
+  <text x="64" y="312" fill="#fecdd3" class="mono" font-size="11">• Over-defensive shims &amp; lecturing disclaimer tone</text>
+  <text x="64" y="332" fill="#fecdd3" class="mono" font-size="11">• Cryptic jargon + dirty tree + unverified prose</text>
 
   <!-- Result banner left -->
-  <rect x="48" y="360" width="396" height="54" rx="10" fill="#f43f5e" fill-opacity="0.14"/>
-  <text x="64" y="382" fill="#fda4af" class="title" font-size="13">Result: AI Brain Fry &amp; Drained Mood</text>
-  <text x="64" y="401" fill="#e2e8f0" class="body" font-size="11.5">+11.2% cognitive load (CSU '26) · +19% slower (METR '25)</text>
+  <rect x="48" y="370" width="396" height="54" rx="10" fill="#f43f5e" fill-opacity="0.14"/>
+  <text x="64" y="392" fill="#fda4af" class="title" font-size="13">Result: AI Brain Fry &amp; Drained Mood</text>
+  <text x="64" y="411" fill="#e2e8f0" class="body" font-size="11.5">+11.2% cognitive load (CSU '26) · +19% slower (METR '25)</text>
 
   <!-- ==================== RIGHT PANEL: AFTER ==================== -->
-  <rect x="496" y="80" width="436" height="352" rx="14" fill="url(#rightCard)" stroke="#10b981" stroke-opacity="0.55" stroke-width="1.5"/>
-  <rect x="514" y="96" width="184" height="26" rx="13" fill="#10b981" fill-opacity="0.2"/>
-  <text x="606" y="113" text-anchor="middle" fill="#6ee7b7" class="title" font-size="11.5">AFTER · WITH CODEX-USE</text>
+  <rect x="496" y="82" width="436" height="360" rx="16" fill="url(#rightCard)" stroke="#7c6cf6" stroke-opacity="0.55" stroke-width="1.5"/>
+  <rect x="514" y="98" width="186" height="26" rx="13" fill="#6366f1" fill-opacity="0.25"/>
+  <text x="607" y="115" text-anchor="middle" fill="#a5b4fc" class="title" font-size="11.5">AFTER · WITH CODEX-USE</text>
 
-  <!-- Confident Optimistic Gemini / Host Coach -->
-  <rect x="516" y="142" width="164" height="104" rx="12" fill="#112936" stroke="url(#geminiGrad)" stroke-width="1.6"/>
-  <circle class="glow" cx="598" cy="197" r="26" fill="url(#geminiGrad)" fill-opacity="0.22"/>
-  <text x="598" y="160" text-anchor="middle" fill="#93c5fd" class="title" font-size="11">Gemini / Host Coach</text>
-  <text x="598" y="174" text-anchor="middle" fill="#a7f3d0" class="body" font-size="10">Optimistic · Confident</text>
-  <!-- Gemini 4-point star + big smile -->
-  <g class="bounce">
-    <circle cx="598" cy="201" r="18" fill="#173847" stroke="url(#geminiGrad)" stroke-width="2"/>
-    <circle cx="592" cy="197" r="2.2" fill="#e0f2fe"/>
-    <circle cx="604" cy="197" r="2.2" fill="#e0f2fe"/>
-    <path d="M590 205 Q598 213 606 205" fill="none" stroke="#6ee7b7" stroke-width="2.2" stroke-linecap="round"/>
-    <!-- Sparkles -->
-    <path class="spark1" d="M624 182 L626 187 L631 189 L626 191 L624 196 L622 191 L617 189 L622 187 Z" fill="#60a5fa"/>
-    <path class="spark2" d="M570 186 L571.5 189.5 L575 191 L571.5 192.5 L570 196 L568.5 192.5 L565 191 L568.5 189.5 Z" fill="#34d399"/>
+  <!-- Optimistic Gemini Coach (Spaceman Squircle Style) -->
+  <rect x="514" y="142" width="166" height="114" rx="14" fill="#13213b" stroke="#818cf8" stroke-opacity="0.55" stroke-width="1.4"/>
+  <text x="597" y="160" text-anchor="middle" fill="#a5b4fc" class="title" font-size="11">Gemini / Host Coach</text>
+  <g class="float">
+    <rect x="569" y="169" width="56" height="56" rx="14" fill="url(#squircleGemini)" filter="url(#softShadow)"/>
+    <rect x="570" y="191" width="6" height="12" rx="3" fill="#e0e7ff"/>
+    <rect x="618" y="191" width="6" height="12" rx="3" fill="#e0e7ff"/>
+    <rect x="575" y="177" width="44" height="40" rx="14" fill="url(#helmetWhite)"/>
+    <rect x="581" y="183" width="32" height="28" rx="9" fill="#11182c"/>
+    <!-- Happy glowing cyan scanline eyes -->
+    <rect x="587" y="190" width="7" height="13" rx="3.5" fill="url(#scanlines)"/>
+    <rect x="600" y="190" width="7" height="13" rx="3.5" fill="url(#scanlines)"/>
+    <!-- Gemini sparkles -->
+    <path class="star1" d="M632 172 L634.5 178 L640.5 180.5 L634.5 183 L632 189 L629.5 183 L623.5 180.5 L629.5 178 Z" fill="#60a5fa"/>
+    <path class="star2" d="M561 177 L562.8 181 L566.8 182.8 L562.8 184.6 L561 188.6 L559.2 184.6 L555.2 182.8 L559.2 181 Z" fill="#38e8ff"/>
   </g>
-  <text x="598" y="236" text-anchor="middle" fill="#bae6fd" class="mono" font-size="9.5">"Worktree's safe, ship it!"</text>
+  <text x="597" y="245" text-anchor="middle" fill="#c7d2fe" class="mono" font-size="9.5">"Safe worktree, ship it!"</text>
 
   <!-- Animated encouragement beam -->
-  <line class="flow" x1="684" y1="194" x2="742" y2="194" stroke="#34d399" stroke-width="2.5" stroke-linecap="round"/>
-  <polygon points="746,194 738,189 738,199" fill="#34d399"/>
-  <text x="714" y="182" text-anchor="middle" fill="#6ee7b7" class="title" font-size="9.5">Cheer &amp;</text>
-  <text x="714" y="212" text-anchor="middle" fill="#6ee7b7" class="title" font-size="9.5">Guardrails</text>
+  <line class="beam" x1="684" y1="197" x2="742" y2="197" stroke="#38e8ff" stroke-width="2.6" stroke-linecap="round"/>
+  <polygon points="746,197 738,192 738,202" fill="#38e8ff"/>
+  <text x="714" y="185" text-anchor="middle" fill="#7dd3fc" class="title" font-size="9.5">Cheer &amp;</text>
+  <text x="714" y="215" text-anchor="middle" fill="#7dd3fc" class="title" font-size="9.5">Guardrails</text>
 
-  <!-- Reassured Codex shipping cleanly -->
-  <rect x="750" y="142" width="162" height="104" rx="12" fill="#102926" stroke="#34d399" stroke-opacity="0.55" stroke-width="1.3"/>
-  <text x="831" y="160" text-anchor="middle" fill="#6ee7b7" class="title" font-size="11">Codex (Reassured)</text>
-  <text x="831" y="174" text-anchor="middle" fill="#94a3b8" class="body" font-size="10">Locked worktree + JSONL</text>
-  <rect x="807" y="184" width="48" height="38" rx="9" fill="#133830" stroke="#34d399" stroke-width="1.6"/>
-  <circle cx="822" cy="199" r="2.6" fill="#d1fae5"/>
-  <circle cx="840" cy="199" r="2.6" fill="#d1fae5"/>
-  <path d="M821 209 Q831 215 841 209" fill="none" stroke="#6ee7b7" stroke-width="2" stroke-linecap="round"/>
-  <!-- Green checkmark badge -->
-  <g class="check">
-    <circle cx="863" cy="190" r="9" fill="#10b981"/>
-    <path d="M859 190 L862 193 L867 187" fill="none" stroke="#06281e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-  </g>
-  <text x="831" y="236" text-anchor="middle" fill="#a7f3d0" class="mono" font-size="9.5">"exit_code: 0 · done!"</text>
+  <!-- Reassured Codex Bot (Spaceman Squircle Style) -->
+  <rect x="750" y="142" width="164" height="114" rx="14" fill="#102533" stroke="#34d399" stroke-opacity="0.55" stroke-width="1.3"/>
+  <text x="832" y="160" text-anchor="middle" fill="#6ee7b7" class="title" font-size="11">Codex (Reassured)</text>
+  <rect x="804" y="169" width="56" height="56" rx="14" fill="url(#squircleCodexOk)" filter="url(#softShadow)"/>
+  <rect x="805" y="191" width="6" height="12" rx="3" fill="#d1fae5"/>
+  <rect x="853" y="191" width="6" height="12" rx="3" fill="#d1fae5"/>
+  <rect x="810" y="177" width="44" height="40" rx="14" fill="url(#helmetWhite)"/>
+  <rect x="816" y="183" width="32" height="28" rx="9" fill="#0f1d24"/>
+  <rect x="822" y="190" width="7" height="13" rx="3.5" fill="url(#scanlines)"/>
+  <rect x="835" y="190" width="7" height="13" rx="3.5" fill="url(#scanlines)"/>
+  <!-- Verified badge -->
+  <circle cx="863" cy="176" r="9.5" fill="#10b981"/>
+  <path d="M858.5 176 L861.5 179 L867.5 172.5" fill="none" stroke="#052e1f" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="832" y="245" text-anchor="middle" fill="#a7f3d0" class="mono" font-size="9.5">"exit_code: 0 · done!"</text>
 
   <!-- Clean pipeline summary -->
-  <rect x="516" y="262" width="396" height="84" rx="10" fill="#0e2328" stroke="#10b981" stroke-opacity="0.35" stroke-width="1"/>
-  <text x="532" y="283" fill="#d1fae5" class="mono" font-size="11">• Host removes fear: isolated worktree + baseline SHA</text>
-  <text x="532" y="303" fill="#d1fae5" class="mono" font-size="11">• Any --model (gpt-6.2-astra / sol) + JSONL exit audit</text>
-  <text x="532" y="323" fill="#d1fae5" class="mono" font-size="11">• Host translates output into clear, warm human prose</text>
+  <rect x="516" y="270" width="396" height="86" rx="10" fill="#101e33" stroke="#6366f1" stroke-opacity="0.35" stroke-width="1"/>
+  <text x="532" y="292" fill="#dbeafe" class="mono" font-size="11">• Host removes fear: isolated worktree + baseline SHA</text>
+  <text x="532" y="312" fill="#dbeafe" class="mono" font-size="11">• Any --model (gpt-6.2-astra / sol) + JSONL exit audit</text>
+  <text x="532" y="332" fill="#dbeafe" class="mono" font-size="11">• Host translates output into warm, normal human prose</text>
 
   <!-- Happy Human banner right -->
-  <rect x="516" y="360" width="396" height="54" rx="10" fill="#10b981" fill-opacity="0.16"/>
-  <g class="bounce">
-    <circle cx="546" cy="387" r="16" fill="#10382e" stroke="#34d399" stroke-width="2"/>
-    <circle cx="541" cy="383" r="1.9" fill="#6ee7b7"/>
-    <circle cx="551" cy="383" r="1.9" fill="#6ee7b7"/>
-    <path d="M539 390 Q546 397 553 390" fill="none" stroke="#6ee7b7" stroke-width="2" stroke-linecap="round"/>
+  <rect x="516" y="370" width="396" height="54" rx="10" fill="#10b981" fill-opacity="0.16"/>
+  <g class="float">
+    <circle cx="546" cy="397" r="16" fill="#10382e" stroke="#34d399" stroke-width="2"/>
+    <circle cx="541" cy="393" r="2" fill="#6ee7b7"/>
+    <circle cx="551" cy="393" r="2" fill="#6ee7b7"/>
+    <path d="M539 400 Q546 407 553 400" fill="none" stroke="#6ee7b7" stroke-width="2.1" stroke-linecap="round"/>
   </g>
-  <text x="574" y="382" fill="#6ee7b7" class="title" font-size="13">Result: Clean Diff, Calm Mind, Happy You</text>
-  <text x="574" y="401" fill="#e2e8f0" class="body" font-size="11.5">Zero direct Codex babysitting · Hackable for any machine</text>
+  <text x="574" y="392" fill="#6ee7b7" class="title" font-size="13">Result: Clean Diff, Calm Mind, Happy You</text>
+  <text x="574" y="411" fill="#e2e8f0" class="body" font-size="11.5">Zero direct Codex babysitting · Hackable for any machine</text>
 </svg>

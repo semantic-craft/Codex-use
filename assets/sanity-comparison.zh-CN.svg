@@ -1,0 +1,202 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 470" role="img" aria-labelledby="title desc">
+  <title id="title">Codex-use：直接和 GPT 硬聊 vs 乐观主 Agent 教练缓冲委派</title>
+  <desc id="desc">动画对比：左侧展示怕犯错、拒绝干活的 Codex 在直接对话中造成 AI 脑雾；右侧展示乐观自信的 Gemini 主 Agent 教练在隔离 worktree 中鼓励 Codex 完结任务并用 JSONL 验真，让人保持好心情。</desc>
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0d1021"/>
+      <stop offset="100%" stop-color="#171b34"/>
+    </linearGradient>
+    <linearGradient id="leftCard" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#26162b"/>
+      <stop offset="100%" stop-color="#181224"/>
+    </linearGradient>
+    <linearGradient id="rightCard" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#16223d"/>
+      <stop offset="100%" stop-color="#111a2e"/>
+    </linearGradient>
+    <linearGradient id="squircleWarn" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#8b5cf6"/>
+      <stop offset="100%" stop-color="#ec4899"/>
+    </linearGradient>
+    <linearGradient id="squircleGemini" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#60a5fa"/>
+      <stop offset="50%" stop-color="#7c6cf6"/>
+      <stop offset="100%" stop-color="#9b6bff"/>
+    </linearGradient>
+    <linearGradient id="squircleCodexOk" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6366f1"/>
+      <stop offset="100%" stop-color="#10b981"/>
+    </linearGradient>
+    <linearGradient id="helmetWhite" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#dbe4ff"/>
+    </linearGradient>
+    <linearGradient id="wordGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#7aa2ff"/>
+      <stop offset="100%" stop-color="#b794ff"/>
+    </linearGradient>
+    <pattern id="scanlines" width="4" height="4" patternUnits="userSpaceOnUse">
+      <rect width="4" height="2.2" fill="#38e8ff"/>
+      <rect y="2.2" width="4" height="1.8" fill="#132238" fill-opacity="0.7"/>
+    </pattern>
+    <pattern id="scanlinesWarn" width="4" height="4" patternUnits="userSpaceOnUse">
+      <rect width="4" height="2.2" fill="#fb7185"/>
+      <rect y="2.2" width="4" height="1.8" fill="#231222" fill-opacity="0.7"/>
+    </pattern>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#050814" flood-opacity="0.45"/>
+    </filter>
+    <style>
+      .title { font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif; font-weight: 700; }
+      .body { font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, 'PingFang SC', Menlo, monospace; }
+
+      @keyframes shiver {
+        0%, 100% { transform: translate(0px, 0px); }
+        25% { transform: translate(-1.6px, 0.5px); }
+        50% { transform: translate(1.6px, -0.5px); }
+        75% { transform: translate(-1px, 0px); }
+      }
+      @keyframes sweatDrop {
+        0%, 100% { transform: translateY(0px); opacity: 0.95; }
+        70% { transform: translateY(7px); opacity: 0.2; }
+      }
+      @keyframes warnPulse {
+        0%, 100% { opacity: 0.4; }
+        50% { opacity: 1; }
+      }
+      @keyframes floatSoft {
+        0%, 100% { transform: translateY(0px); }
+        50% { transform: translateY(-3.5px); }
+      }
+      @keyframes flowBeam {
+        from { stroke-dashoffset: 24; }
+        to { stroke-dashoffset: 0; }
+      }
+      @keyframes twinkle {
+        0%, 100% { opacity: 0.35; transform: scale(0.85); }
+        50% { opacity: 1; transform: scale(1.2); }
+      }
+      .shiver { animation: shiver 0.65s ease-in-out infinite; }
+      .sweat { animation: sweatDrop 1.7s ease-in-out infinite; }
+      .warn { animation: warnPulse 1.5s ease-in-out infinite; }
+      .float { animation: floatSoft 2.5s ease-in-out infinite; }
+      .beam { stroke-dasharray: 6 6; animation: flowBeam 1s linear infinite; }
+      .star1 { transform-box: fill-box; transform-origin: center; animation: twinkle 1.7s ease-in-out infinite; }
+      .star2 { transform-box: fill-box; transform-origin: center; animation: twinkle 1.7s ease-in-out 0.85s infinite; }
+    </style>
+  </defs>
+
+  <rect width="960" height="470" rx="20" fill="url(#bg)"/>
+
+  <!-- Header -->
+  <text x="480" y="39" text-anchor="middle" fill="url(#wordGrad)" class="title" font-size="21">
+    怕犯错的内向打工人，遇上乐观自信的主 Agent 教练
+  </text>
+  <text x="480" y="61" text-anchor="middle" fill="#9aa8cc" class="body" font-size="13">
+    让乐观自信的 Gemini / Antigravity / Grok / DSH 替你哄好 Codex，把干净 Diff 和好心情留给自己
+  </text>
+
+  <!-- ==================== LEFT PANEL: BEFORE ==================== -->
+  <rect x="28" y="82" width="436" height="360" rx="16" fill="url(#leftCard)" stroke="#f43f5e" stroke-opacity="0.4" stroke-width="1.5"/>
+  <rect x="46" y="98" width="168" height="26" rx="13" fill="#f43f5e" fill-opacity="0.18"/>
+  <text x="130" y="115" text-anchor="middle" fill="#fda4af" class="title" font-size="11.5">改造前 · 直接和 GPT 硬聊</text>
+
+  <!-- Anxious Codex Squircle -->
+  <g class="shiver">
+    <rect x="52" y="142" width="156" height="114" rx="14" fill="#211428" stroke="#fb7185" stroke-opacity="0.45" stroke-width="1.2"/>
+    <text x="130" y="160" text-anchor="middle" fill="#fda4af" class="title" font-size="11">Codex / GPT</text>
+    <rect x="102" y="169" width="56" height="56" rx="14" fill="url(#squircleWarn)" filter="url(#softShadow)"/>
+    <rect x="103" y="191" width="6" height="12" rx="3" fill="#e2e8f0"/>
+    <rect x="151" y="191" width="6" height="12" rx="3" fill="#e2e8f0"/>
+    <rect x="108" y="177" width="44" height="40" rx="14" fill="url(#helmetWhite)"/>
+    <rect x="114" y="183" width="32" height="28" rx="9" fill="#171426"/>
+    <rect x="120" y="191" width="7" height="11" rx="3.5" fill="url(#scanlinesWarn)"/>
+    <rect x="133" y="191" width="7" height="11" rx="3.5" fill="url(#scanlinesWarn)"/>
+    <path class="sweat" d="M161 174 C161 174 166 181 166 184.5 C166 187.3 163.8 189.5 161 189.5 C158.2 189.5 156 187.3 156 184.5 C156 181 161 174 161 174 Z" fill="#38e8ff"/>
+    <text x="130" y="245" text-anchor="middle" fill="#fecdd3" class="body" font-size="10">“怕改坏，请先确认…”</text>
+  </g>
+
+  <!-- Friction -->
+  <text x="246" y="191" text-anchor="middle" fill="#fb7185" class="title" font-size="18">⇄</text>
+  <text x="246" y="209" text-anchor="middle" fill="#fda4af" class="body" font-size="10">来回拉扯</text>
+  <text x="246" y="222" text-anchor="middle" fill="#fda4af" class="body" font-size="10">精神内耗</text>
+
+  <!-- Stressed Human -->
+  <rect x="284" y="142" width="160" height="114" rx="14" fill="#211428" stroke="#f59e0b" stroke-opacity="0.45" stroke-width="1.2"/>
+  <text x="364" y="160" text-anchor="middle" fill="#fcd34d" class="title" font-size="11">你（亲自监工）</text>
+  <circle cx="364" cy="197" r="24" fill="#361a2a" stroke="#fb7185" stroke-width="2" filter="url(#softShadow)"/>
+  <path d="M353 191 L359 195 M359 191 L353 195 M369 191 L375 195 M375 191 L369 195" stroke="#fda4af" stroke-width="2" stroke-linecap="round"/>
+  <path d="M354 209 Q364 201 374 209" fill="none" stroke="#fda4af" stroke-width="2" stroke-linecap="round"/>
+  <path class="warn" d="M396 177 L389 189 L396 189 L390 201" fill="none" stroke="#fbbf24" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="364" y="245" text-anchor="middle" fill="#fde68a" class="body" font-size="10">“求你直接把测试跑完！”</text>
+
+  <!-- Failure list -->
+  <rect x="48" y="270" width="396" height="86" rx="10" fill="#231626" stroke="#f43f5e" stroke-opacity="0.32" stroke-width="1"/>
+  <text x="64" y="292" fill="#fecdd3" class="body" font-size="11.5">• 拒绝干活甩锅：“以下是建议下一步，你可以自己运行…”</text>
+  <text x="64" y="312" fill="#fecdd3" class="body" font-size="11.5">• 过度防御堆垫片 + 臭名昭著的说教官腔与黑话简写</text>
+  <text x="64" y="332" fill="#fecdd3" class="body" font-size="11.5">• 工作区改脏 + 口头宣称通过却不给真实退出码证据</text>
+
+  <!-- Result banner left -->
+  <rect x="48" y="370" width="396" height="54" rx="10" fill="#f43f5e" fill-opacity="0.14"/>
+  <text x="64" y="392" fill="#fda4af" class="title" font-size="13">结果：AI 脑雾耗竭，干完活心情更差</text>
+  <text x="64" y="411" fill="#e2e8f0" class="body" font-size="11.5">客观认知负荷 +11.2%（CSU '26） · 实测慢 19%（METR '25）</text>
+
+  <!-- ==================== RIGHT PANEL: AFTER ==================== -->
+  <rect x="496" y="82" width="436" height="360" rx="16" fill="url(#rightCard)" stroke="#7c6cf6" stroke-opacity="0.55" stroke-width="1.5"/>
+  <rect x="514" y="98" width="176" height="26" rx="13" fill="#6366f1" fill-opacity="0.25"/>
+  <text x="602" y="115" text-anchor="middle" fill="#a5b4fc" class="title" font-size="11.5">改造后 · 装上 Codex-use</text>
+
+  <!-- Optimistic Gemini Coach -->
+  <rect x="514" y="142" width="166" height="114" rx="14" fill="#13213b" stroke="#818cf8" stroke-opacity="0.55" stroke-width="1.4"/>
+  <text x="597" y="160" text-anchor="middle" fill="#a5b4fc" class="title" font-size="11">Gemini / 主 Agent 教练</text>
+  <g class="float">
+    <rect x="569" y="169" width="56" height="56" rx="14" fill="url(#squircleGemini)" filter="url(#softShadow)"/>
+    <rect x="570" y="191" width="6" height="12" rx="3" fill="#e0e7ff"/>
+    <rect x="618" y="191" width="6" height="12" rx="3" fill="#e0e7ff"/>
+    <rect x="575" y="177" width="44" height="40" rx="14" fill="url(#helmetWhite)"/>
+    <rect x="581" y="183" width="32" height="28" rx="9" fill="#11182c"/>
+    <rect x="587" y="190" width="7" height="13" rx="3.5" fill="url(#scanlines)"/>
+    <rect x="600" y="190" width="7" height="13" rx="3.5" fill="url(#scanlines)"/>
+    <path class="star1" d="M632 172 L634.5 178 L640.5 180.5 L634.5 183 L632 189 L629.5 183 L623.5 180.5 L629.5 178 Z" fill="#60a5fa"/>
+    <path class="star2" d="M561 177 L562.8 181 L566.8 182.8 L562.8 184.6 L561 188.6 L559.2 184.6 L555.2 182.8 L559.2 181 Z" fill="#38e8ff"/>
+  </g>
+  <text x="597" y="245" text-anchor="middle" fill="#c7d2fe" class="body" font-size="10">“隔离区兜底，放心干！”</text>
+
+  <!-- Animated encouragement beam -->
+  <line class="beam" x1="684" y1="197" x2="742" y2="197" stroke="#38e8ff" stroke-width="2.6" stroke-linecap="round"/>
+  <polygon points="746,197 738,192 738,202" fill="#38e8ff"/>
+  <text x="714" y="185" text-anchor="middle" fill="#7dd3fc" class="title" font-size="9.5">正向鼓励</text>
+  <text x="714" y="215" text-anchor="middle" fill="#7dd3fc" class="title" font-size="9.5">硬门禁</text>
+
+  <!-- Reassured Codex -->
+  <rect x="750" y="142" width="164" height="114" rx="14" fill="#102533" stroke="#34d399" stroke-opacity="0.55" stroke-width="1.3"/>
+  <text x="832" y="160" text-anchor="middle" fill="#6ee7b7" class="title" font-size="11">Codex（支棱起来）</text>
+  <rect x="804" y="169" width="56" height="56" rx="14" fill="url(#squircleCodexOk)" filter="url(#softShadow)"/>
+  <rect x="805" y="191" width="6" height="12" rx="3" fill="#d1fae5"/>
+  <rect x="853" y="191" width="6" height="12" rx="3" fill="#d1fae5"/>
+  <rect x="810" y="177" width="44" height="40" rx="14" fill="url(#helmetWhite)"/>
+  <rect x="816" y="183" width="32" height="28" rx="9" fill="#0f1d24"/>
+  <rect x="822" y="190" width="7" height="13" rx="3.5" fill="url(#scanlines)"/>
+  <rect x="835" y="190" width="7" height="13" rx="3.5" fill="url(#scanlines)"/>
+  <circle cx="863" cy="176" r="9.5" fill="#10b981"/>
+  <path d="M858.5 176 L861.5 179 L867.5 172.5" fill="none" stroke="#052e1f" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="832" y="245" text-anchor="middle" fill="#a7f3d0" class="mono" font-size="9.5">“exit_code: 0 · 搞定！”</text>
+
+  <!-- Clean pipeline summary -->
+  <rect x="516" y="270" width="396" height="86" rx="10" fill="#101e33" stroke="#6366f1" stroke-opacity="0.35" stroke-width="1"/>
+  <text x="532" y="292" fill="#dbeafe" class="body" font-size="11.5">• 消除畏缩：隔离 git worktree + 基线 commit 安全兜底</text>
+  <text x="532" y="312" fill="#dbeafe" class="body" font-size="11.5">• 任选 --model（gpt-6.2-astra / sol）+ JSONL 实跑验真</text>
+  <text x="532" y="332" fill="#dbeafe" class="body" font-size="11.5">• 宿主把结果翻译成清爽人话，省心省脑</text>
+
+  <!-- Happy Human banner right -->
+  <rect x="516" y="370" width="396" height="54" rx="10" fill="#10b981" fill-opacity="0.16"/>
+  <g class="float">
+    <circle cx="546" cy="397" r="16" fill="#10382e" stroke="#34d399" stroke-width="2"/>
+    <circle cx="541" cy="393" r="2" fill="#6ee7b7"/>
+    <circle cx="551" cy="393" r="2" fill="#6ee7b7"/>
+    <path d="M539 400 Q546 407 553 400" fill="none" stroke="#6ee7b7" stroke-width="2.1" stroke-linecap="round"/>
+  </g>
+  <text x="574" y="392" fill="#6ee7b7" class="title" font-size="13">结果：干净 Diff、脑子清爽、心情大好</text>
+  <text x="574" y="411" fill="#e2e8f0" class="body" font-size="11.5">告别直接盯梢 Codex · 轻量框架略改即可适配任意机器</text>
+</svg>

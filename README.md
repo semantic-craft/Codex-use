@@ -1,12 +1,23 @@
-# Codex-use
+<div align="center">
 
-[中文文档](README.zh-CN.md)
+<img src="assets/header.png" alt="Codex-use" width="540" />
 
-**Stop arguing with GPT and Codex directly. Protect your cognitive bandwidth, keep your good mood, and let your favorite host agent babysit the worker.**
+<p><strong>Stop arguing with GPT and Codex directly. Protect your cognitive bandwidth, keep your good mood, and let an optimistic host agent babysit the worker.</strong></p>
 
-<p align="center">
-  <img src="assets/sanity-comparison.svg" alt="Before and after Codex-use: less cognitive fatigue, cleaner diffs, better mood" width="920" />
+<p>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-7c6cf6?style=flat-square" alt="License: Apache-2.0" /></a>
+  <img src="https://img.shields.io/badge/Python-3.10%2B%20stdlib%20only-3b82f6?style=flat-square" alt="Python 3.10+ stdlib only" />
+  <img src="https://img.shields.io/badge/Workers-Codex%20CLI%20%C2%B7%20DSH-10b981?style=flat-square" alt="Workers: Codex CLI and DSH" />
+  <img src="https://img.shields.io/badge/Hosts-Antigravity%20%C2%B7%20Grok%20Bot%20%C2%B7%20DSH-8b5cf6?style=flat-square" alt="Hosts: Antigravity, Grok Bot, DSH" />
 </p>
+
+<p>
+  <strong>English</strong> | <a href="README.zh-CN.md">简体中文</a>
+</p>
+
+<img src="assets/sanity-comparison.svg" alt="Before and after Codex-use: less cognitive fatigue, cleaner diffs, better mood" width="920" />
+
+</div>
 
 **Codex-use** is a lightweight, hackable agent skill and zero-dependency Python runner (`skills/codex-use/scripts/drive.py`) that puts any shell-capable host agent (Antigravity, Grok Bot, DeepSeek Harness, Claude Code, Cursor, or your own setup) in front of official headless coding CLIs (`codex` and `dsh`).
 

@@ -1,12 +1,23 @@
-# Codex-use
+<div align="center">
 
-[English README](README.md)
+<img src="assets/header.png" alt="Codex-use" width="540" />
 
-**别再亲自跟 GPT / Codex 硬聊了：把监工、催活和审计外包给你顺手的主 Agent，保住你的认知带宽与好心情。**
+<p><strong>别再亲自跟 GPT / Codex 硬聊了：把监工、催活和审计外包给乐观自信的主 Agent 教练，保住你的认知带宽与好心情。</strong></p>
 
-<p align="center">
-  <img src="assets/sanity-comparison.svg" alt="使用 Codex-use 前后对比：告别 AI 监工脑雾，收获干净 Diff 与好心情" width="920" />
+<p>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-7c6cf6?style=flat-square" alt="License: Apache-2.0" /></a>
+  <img src="https://img.shields.io/badge/Python-3.10%2B%20%E9%9B%B6%E4%BE%9D%E8%B5%96-3b82f6?style=flat-square" alt="Python 3.10+ 零依赖" />
+  <img src="https://img.shields.io/badge/Workers-Codex%20CLI%20%C2%B7%20DSH-10b981?style=flat-square" alt="Workers: Codex CLI 与 DSH" />
+  <img src="https://img.shields.io/badge/Hosts-Antigravity%20%C2%B7%20Grok%20Bot%20%C2%B7%20DSH-8b5cf6?style=flat-square" alt="Hosts: Antigravity, Grok Bot, DSH" />
 </p>
+
+<p>
+  <a href="README.md">English</a> | <strong>简体中文</strong>
+</p>
+
+<img src="assets/sanity-comparison.zh-CN.svg" alt="使用 Codex-use 前后对比：告别 AI 脑雾与拉扯，收获干净 Diff 与好心情" width="920" />
+
+</div>
 
 **Codex-use** 是一个轻量、可自由改造的 Agent Skill 与零依赖 Python 执行器（`skills/codex-use/scripts/drive.py`），让任意具备本地 Shell 能力的宿主 Agent（Antigravity、Grok Bot、DeepSeek Harness、Claude Code、Cursor 等）替你调度官方无头编程 CLI（`codex` 与 `dsh`）。
 
