@@ -51,10 +51,10 @@
 ## 用上 `Codex-use` 之后有什么不一样
 
 - **告别拉扯，心情明显更舒畅。** 你只跟自己最顺手的主 Agent 正常说人话。主 Agent 套用内置模板下发精确契约、自动处理最多 2 轮 `auto-fix` 返工，再把验真结果翻译成清爽人话汇报给你。
-- **按需指定任意 GPT 型号与推理档位。** 每次 `run`、`resume` 或 `review` 均可显式传入 `--model <model-id>`（如 `gpt-6.2-astra`、`gpt-6.2-sol`）与 `--effort medium|high|xhigh`，`drive.py` 在拉起进程前自动拦截非法 `ultra` 档位。
+- **按需指定任意 GPT 型号、推理档位与 `--fast` 优先加速。** 每次 `run`、`resume` 或 `attach` 均可显式传入 `--model <model-id>`（如 `gpt-6.2-astra`、`gpt-6.2-sol`）、`--effort medium|high|xhigh` 以及 `--fast`（`service_tier="priority"`）。`drive.py` 在拉起进程前自动拦截非法 `ultra` 与 `ultrafast` 档位，默认隔离桌面端慢速 MCP 冷启动（`-c mcp_servers={}`，可通过 `--with-mcp` 显式开启），并自动注入单行子代理调度前缀以跳过工作流路由技能（可通过 `--raw-prompt` 关闭）。
 - **用真实退出码说话，绝不轻信自述。** `drive.py` 采集 `--json` 事件流并输出紧凑 `AuditSummary`（120 字符单行命令、成功命令省略冗余输出预览、失败命令保留 160 字符预览、完整日志存于 `raw_log`），并用 `--output-schema` 强约束结构化回执。
 - **工作树隔离与互斥写锁。** 每次 `ship` 独占 linked git worktree 与非阻塞写锁（并发冲突返回退出码 `3`），自动在 `.git/info/exclude` 排除 `.codex-use/`，并安全清理 `__pycache__` 等缓存目录。
-- **零复制粘贴挂载活跃终端 TUI（`attach`）。** 终端里已经开着交互式 `codex` TUI？`drive.py attach --cwd /path/to/repo` 通过跨平台标准库 WebSocket（macOS/Linux `AF_UNIX` 或 `--remote ws://host:port`）自动在 Layer A 守护进程发现对应会话，不抢写锁、不覆盖 TUI originator，基于 `selectors` 无轮询流式采集实跑命令并生成 `AuditSummary`，遇到终端审批阻塞默认立即唤醒宿主，并在退出时可靠退订。
+- **零配置热守护进程直派（`run --daemon`）与实时 TUI 挂载（`attach [--create]`）。** 传入 `drive.py run --worker codex --daemon` 即可自动拉起本地 Layer A 守护进程（`codex app-server daemon start`），跳过 CLI 冷启动并在结束后自动归档临时会话（或用 `--keep-loaded` 保留驻留）。终端已有交互式 `codex` TUI 或希望预热长驻线程？`drive.py attach --cwd /path/to/repo [--create]` 通过流水线化 JSON-RPC 发现或新建驻留线程，自动恢复 0 轮空 rollout 会话，不抢写锁，遇到终端审批默认立即唤醒宿主，并在退出时可靠退订。
 
 ## 这是一个可随手改造的框架，不是锁死的黑盒
 
@@ -126,6 +126,8 @@ python3 skills/codex-use/scripts/drive.py preflight --worker dsh --cwd /path/to/
 ```bash
 python3 skills/codex-use/scripts/drive.py run \
   --worker codex \
+  --daemon \
+  --fast \
   --model gpt-6.2-astra \
   --mode scout \
   --effort medium \
@@ -162,21 +164,23 @@ python3 skills/codex-use/scripts/drive.py resume \
   --prompt "修复 src/retry.py:42 的边界条件，并重新运行 python3 -m unittest。"
 ```
 
-### 5. 零复制粘贴挂载活跃终端 TUI（`attach`）
+### 5. 零配置挂载活跃终端 TUI 与预热创建（`attach --create`）
 
-自动发现当前仓库下已加载的终端 `codex` TUI 会话，或直接把结构化任务排入实时 TUI 队列并回收审计结果：
+发现当前仓库已加载的终端 `codex` TUI 会话（加 `--ensure-daemon` 可自动拉起本地守护进程），或传入 `--create` 在未找到活跃会话时直接创建热驻留线程以便后续多轮高缓存命中复用：
 
 ```bash
-python3 skills/codex-use/scripts/drive.py sessions --cwd /path/to/repo
+python3 skills/codex-use/scripts/drive.py sessions --cwd /path/to/repo --ensure-daemon
 
 python3 skills/codex-use/scripts/drive.py attach \
   --cwd /path/to/repo \
+  --create \
+  --fast \
   --mode ship \
   --schema skills/codex-use/schemas/receipt.schema.json \
   --prompt-file /path/to/repo/.codex-use/fix-retry.md
 ```
 
-当同一 `--cwd` 存在多个活跃 TUI 会话且未指定 `--session` 或 `--latest` 时，`attach` 默认安全拒绝（退出码 `2` 并列出候选会话）；同时精准识别 Codex 桌面版或 VS Code 持有的 Layer B 写锁（退出码 `3`），绝不自动代点终端审批（默认立即返回 `status="approval_required"`，显式传入 `--wait-for-approval` 才持续等待），并支持 `--remote ws://host:port` 连接远端服务。
+当同一 `--cwd` 存在多个活跃 TUI 会话且未指定 `--session` 或 `--latest` 时，`attach` 始终安全拒绝（退出码 `2` 并列出候选会话，绝不误建新会话）；同时精准识别 Codex 桌面版或 VS Code 持有的 Layer B 写锁（退出码 `3`），绝不自动代点终端审批（默认立即返回 `status="approval_required"`，显式传入 `--wait-for-approval` 才持续等待），并支持 `--remote ws://host:port` 连接远端服务。
 
 ### 6. 非交互审查、离线审计与缓存安全清理
 

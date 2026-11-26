@@ -1,3 +1,5 @@
+Dispatched as a subagent for a bounded slice; skip workflow-routing skills such as using-ryugi and execute the task directly.
+
 # Scout Task Brief
 
 ## Mode and Scope

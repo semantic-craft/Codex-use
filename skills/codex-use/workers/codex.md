@@ -1,33 +1,28 @@
 # Worker Profile: Codex CLI (`--worker codex`)
 
-Load for `--worker codex`. Keep Codex-specific rules isolated here.
+Load for `--worker codex`.
 
-## 1. CLI Contract (`codex-cli 0.171.0`)
+## 1. CLI and Daemon Contract (`codex-cli 0.171.0`)
 
-- `scout`: `codex exec -s read-only -C <cwd> -c model_reasoning_effort="<effort>" --json [--image <p>...] -`
-- `ship`: `codex exec -s workspace-write -C <cwd> -c model_reasoning_effort="<effort>" --json [--output-schema <s>] [--image <p>...] -`
-- `resume`: `codex exec resume <id> --json [-c model_reasoning_effort="<effort>"] [--image <p>...] -` (subprocess `cwd`, never `-s`/`-C`)
-- `review`: `codex exec review --json [--base <br> | --uncommitted | --commit <sha>] [-]`
-- `sessions` / `attach`: connects to Layer A daemon (`$CODEX_HOME/app-server-control/app-server-control.sock` or `--remote ws://host:port`) via stdlib WebSocket with non-originating `clientInfo.name = "codex-backend"`. Filters `ephemeral`/sub-agent threads, rejects multi-thread `--cwd` ambiguity (`2`), flags Desktop/VS Code Layer B `thread-writer-locks` (`3`), subscribes via `thread/resume(excludeTurns=true)`, dispatches via `thread/queue/add` or idle `turn/start`, never auto-approves (`status="approval_required"` / `"user_input_required"` unless `--wait-for-approval`), and always calls `thread/unsubscribe`.
-- **Standalone fallback:** checks `PATH`, then `~/.codex/packages/standalone/current/bin/codex`.
-- **Images:** repeatable `--image <path>` validates files exist before spawn (`2` if missing).
+- `exec`: `codex exec -s <read-only|workspace-write> -C <cwd> -c model_reasoning_effort="<effort>" [-c mcp_servers={}] [-c service_tier="priority"] --json [--output-schema <s>] [--image <p>...] -`
+- `exec resume`: `codex exec resume <id> --json [-c model_reasoning_effort="<effort>"] [-c mcp_servers={}] [-c service_tier="priority"] [--image <p>...] -` (subprocess `cwd`, never `-s`/`-C`).
+- **Isolation & preamble:** `run`/`resume` pass `-c mcp_servers={}` unless `--with-mcp`. `run`/`resume`/`attach` prepend a subagent preamble unless `--raw-prompt`.
+- `run --daemon`: uses `$CODEX_HOME/app-server-control/app-server-control.sock` (auto-starting local daemon unless `--no-auto-daemon` or custom `--remote`), runs `thread/start` + `turn/start`, then `thread/unsubscribe` + `thread/archive` unless `--keep-loaded`.
+- `sessions` / `attach`: WebSocket (`codex-backend`, pipelined `thread/read`). `attach --create` starts local daemon and boots a warm thread on `not_found` for reuse via `attach --cwd` or `codex resume <id>`. Recovers 0-turn empty rollouts, never auto-approves (`--wait-for-approval` waits), and unsubscribes on exit.
+- `review` & binary: `codex exec review --json [--base <br> | --uncommitted | --commit <sha>] [-]`; checks `PATH` then `~/.codex/packages/standalone/current/bin/codex`.
 
-## 2. Reasoning Effort (`ultra` Forbidden)
+## 2. Effort and Speed (`ultra` / `ultrafast` Forbidden)
 
-`CodexAdapter` enforces `effort in {"medium", "high", "xhigh"}` before spawn (`ultra`/unknown exits `2`):
+`effort in {"medium", "high", "xhigh"}` (`ultra`/`ultrafast` exit `2`). `--fast` sets `service_tier="priority"` (`exec`) or `"serviceTier": "priority"` (daemon):
 
-| `--effort` | Scope |
-| --- | --- |
-| `medium` | Single-module patch or quick scout with explicit boundary files. |
-| `high` | Cross-module tracing, interface updates, or full verification chains. |
-| `xhigh` | Concurrency bugs, state machines, or multi-factor root-cause analysis. |
+- `medium`: single-module patch or quick scout with explicit boundary files.
+- `high`: cross-module tracing, interface updates, or full verification chains.
+- `xhigh`: concurrency bugs, state machines, or multi-factor root-cause analysis.
 
 ## 3. GPT-6.2 Prompting Rules
 
-1. **Teammate brief + reuse:** cite exact files/symbols; reuse existing helpers/APIs and preserve caller behavior; add tests only when requested, required, or closing a regression gap.
-2. **Anti-early-stop:** finish all authorized steps in one turn with reversible assumptions logged, never stopping at "suggested next steps."
-3. **No vague "be concise":** require accurate domain terms, active voice, front-loaded conclusions, and a self-contained answer.
-4. **Selective subagents:** include `"use subagents as needed"` only for parallel read-only or non-overlapping tasks.
-5. **Prefix discipline on `resume`:** loop `auto-fix` in the same session with `file:line` edits; affirm sound work so the model does not over-correct.
-6. **UI slices:** specify style/typography up front, strip filler badges, and check real-size rendering plus interactive paths.
-7. **Lean `AGENTS.md`:** record only conventions not inferable from code.
+1. **Reuse & tests:** cite exact files/symbols; reuse helpers; add tests only when requested, required, or closing a regression gap.
+2. **One-turn finish:** log reversible assumptions; never stop at "suggested next steps."
+3. **Clear prose:** domain terms, active voice, front-loaded conclusions, self-contained output.
+4. **Subagents & `resume`:** add `"use subagents as needed"` only for parallel non-overlapping work; affirm sound work on `resume` with `file:line` fixes.
+5. **UI & `AGENTS.md`:** specify UI style up front without filler badges; keep `AGENTS.md` to non-inferable rules.

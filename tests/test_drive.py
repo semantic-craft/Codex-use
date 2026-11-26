@@ -84,6 +84,8 @@ class CodexAdapterTests(unittest.TestCase):
                 str(cwd),
                 "-c",
                 'model_reasoning_effort="medium"',
+                "-c",
+                "mcp_servers={}",
                 "--json",
                 "-",
             ],
@@ -98,6 +100,7 @@ class CodexAdapterTests(unittest.TestCase):
                 cwd=cwd,
                 effort="xhigh",
                 model="gpt-6.2-codex",
+                fast=True,
                 schema_path=schema,
                 output_last_message=out_msg,
             )
@@ -113,6 +116,10 @@ class CodexAdapterTests(unittest.TestCase):
                 str(cwd),
                 "-c",
                 'model_reasoning_effort="xhigh"',
+                "-c",
+                "mcp_servers={}",
+                "-c",
+                'service_tier="priority"',
                 "--json",
                 "-o",
                 str(out_msg),
@@ -124,42 +131,71 @@ class CodexAdapterTests(unittest.TestCase):
             ],
         )
 
+        with_mcp_cmd = self.adapter.build_run_cmd(
+            drive.RunRequest(
+                worker="codex",
+                mode="scout",
+                cwd=cwd,
+                effort="medium",
+                with_mcp=True,
+            )
+        )
+        self.assertNotIn("mcp_servers={}", with_mcp_cmd)
+
     def test_rejects_ultra_and_unknown_effort_before_spawn(self) -> None:
-        with self.assertRaises(drive.ValidationError):
-            self.adapter.build_run_cmd(
-                drive.RunRequest(worker="codex", mode="scout", cwd=Path("/tmp"), effort="ultra")
-            )
-        with self.assertRaises(drive.ValidationError):
-            self.adapter.build_resume_cmd(
-                drive.ResumeRequest(
-                    worker="codex",
-                    session_id="thread-1",
-                    mode="ship",
-                    cwd=Path("/tmp"),
-                    effort="turbo",
+        for forbidden_val in ("ultra", "ultrafast", "ULTRAFAST", "turbo"):
+            with self.assertRaises(drive.ValidationError):
+                self.adapter.build_run_cmd(
+                    drive.RunRequest(
+                        worker="codex", mode="scout", cwd=Path("/tmp"), effort=forbidden_val
+                    )
                 )
-            )
+            with self.assertRaises(drive.ValidationError):
+                self.adapter.build_resume_cmd(
+                    drive.ResumeRequest(
+                        worker="codex",
+                        session_id="thread-1",
+                        mode="ship",
+                        cwd=Path("/tmp"),
+                        effort=forbidden_val,
+                    )
+                )
+        for bad_tier in ("ultra", "ultrafast"):
+            with self.assertRaises(drive.ValidationError):
+                drive._validate_codex_service_tier(bad_tier)
+        self.assertEqual(drive._validate_codex_service_tier("priority"), "priority")
 
         with tempfile.TemporaryDirectory() as td:
-            proc = _run_drive(
-                [
-                    "run",
-                    "--worker",
-                    "codex",
-                    "--mode",
-                    "scout",
-                    "--cwd",
-                    td,
-                    "--effort",
-                    "ultra",
-                    "--prompt",
-                    "inspect repo",
-                ]
-            )
-            self.assertEqual(proc.returncode, drive.EXIT_INVALID_ARGS)
-            payload = json.loads(proc.stdout)
-            self.assertEqual(payload["error"], "invalid_arguments")
-            self.assertIn("ultra", payload["message"].lower())
+            for bad_effort in ("ultra", "ultrafast"):
+                for sub_args in (
+                    [
+                        "run",
+                        "--worker",
+                        "codex",
+                        "--mode",
+                        "scout",
+                        "--cwd",
+                        td,
+                        "--effort",
+                        bad_effort,
+                        "--prompt",
+                        "inspect repo",
+                    ],
+                    [
+                        "attach",
+                        "--cwd",
+                        td,
+                        "--effort",
+                        bad_effort,
+                        "--prompt",
+                        "inspect repo",
+                    ],
+                ):
+                    proc = _run_drive(sub_args)
+                    self.assertEqual(proc.returncode, drive.EXIT_INVALID_ARGS)
+                    payload = json.loads(proc.stdout)
+                    self.assertEqual(payload["error"], "invalid_arguments")
+                    self.assertIn(bad_effort, payload["message"].lower())
 
     def test_build_resume_cmd_never_passes_sandbox_or_cd(self) -> None:
         cmd = self.adapter.build_resume_cmd(
@@ -170,6 +206,7 @@ class CodexAdapterTests(unittest.TestCase):
                 cwd=Path("/tmp/wt"),
                 effort="high",
                 model="gpt-6.2-codex",
+                fast=True,
                 schema_path=Path("/tmp/receipt.schema.json"),
                 output_last_message=Path("/tmp/last.txt"),
             )
@@ -192,11 +229,145 @@ class CodexAdapterTests(unittest.TestCase):
                 "/tmp/receipt.schema.json",
                 "-c",
                 'model_reasoning_effort="high"',
+                "-c",
+                "mcp_servers={}",
+                "-c",
+                'service_tier="priority"',
                 "-m",
                 "gpt-6.2-codex",
                 "-",
             ],
         )
+
+        resume_with_mcp = self.adapter.build_resume_cmd(
+            drive.ResumeRequest(
+                worker="codex",
+                session_id="019c1234-5678-7000-8000-000000000001",
+                mode="ship",
+                cwd=Path("/tmp/wt"),
+                with_mcp=True,
+            )
+        )
+        self.assertNotIn("mcp_servers={}", resume_with_mcp)
+
+    def test_subagent_preamble_and_headless_mcp_flags_end_to_end(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = _init_temp_repo(root)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            captured_args = root / "captured_args.json"
+            captured_stdin = root / "captured_stdin.txt"
+            fake_codex = fake_bin / "codex"
+            fake_codex.write_text(
+                f"#!{sys.executable}\n"
+                "import json, sys\n"
+                f"open({str(captured_args)!r}, 'w', encoding='utf-8').write(json.dumps(sys.argv[1:]))\n"
+                f"open({str(captured_stdin)!r}, 'w', encoding='utf-8').write(sys.stdin.read())\n"
+                "print(json.dumps({'type': 'thread.started', 'thread_id': 't-pre'}))\n"
+                "print(json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'done'}}))\n",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(fake_codex.stat().st_mode | stat.S_IXUSR)
+            env = {"PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"}
+
+            default_run = _run_drive(
+                [
+                    "run",
+                    "--worker",
+                    "codex",
+                    "--mode",
+                    "scout",
+                    "--fast",
+                    "--cwd",
+                    str(repo),
+                    "--prompt",
+                    "Check retry logic.",
+                ],
+                env=env,
+            )
+            self.assertEqual(default_run.returncode, drive.EXIT_OK, default_run.stdout + default_run.stderr)
+            argv_default = json.loads(captured_args.read_text(encoding="utf-8"))
+            stdin_default = captured_stdin.read_text(encoding="utf-8")
+            self.assertIn("mcp_servers={}", argv_default)
+            self.assertIn('service_tier="priority"', argv_default)
+            self.assertTrue(stdin_default.startswith(drive.SUBAGENT_DISPATCH_PREAMBLE))
+            self.assertEqual(stdin_default.count("using-ryugi"), 1)
+            self.assertTrue(stdin_default.endswith("Check retry logic."))
+
+            raw_with_mcp = _run_drive(
+                [
+                    "resume",
+                    "--worker",
+                    "codex",
+                    "--session",
+                    "t-pre",
+                    "--mode",
+                    "scout",
+                    "--with-mcp",
+                    "--raw-prompt",
+                    "--cwd",
+                    str(repo),
+                    "--prompt",
+                    "Check retry logic verbatim.",
+                ],
+                env=env,
+            )
+            self.assertEqual(raw_with_mcp.returncode, drive.EXIT_OK)
+            argv_raw = json.loads(captured_args.read_text(encoding="utf-8"))
+            stdin_raw = captured_stdin.read_text(encoding="utf-8")
+            self.assertNotIn("mcp_servers={}", argv_raw)
+            self.assertEqual(stdin_raw, "Check retry logic verbatim.")
+
+            template_prompt = (SKILL_ROOT / "templates" / "scout-task.md").read_text(encoding="utf-8")
+            deduped = drive._apply_prompt_preamble(template_prompt, raw_prompt=False)
+            self.assertEqual(deduped, template_prompt)
+            self.assertEqual(deduped.count(drive.SUBAGENT_DISPATCH_PREAMBLE), 1)
+
+    def test_single_subprocess_inspect_git_context_and_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = _init_temp_repo(root)
+            wt_info = drive.create_worktree(repo, "git-ctx-perf")
+            wt_path = Path(wt_info["worktree"])
+            unborn = root / "unborn-repo"
+            unborn.mkdir()
+            _git(unborn, "init", "-b", "main")
+            non_git = root / "plain-dir"
+            non_git.mkdir()
+
+            drive.clear_git_context_cache()
+            with mock.patch.object(drive, "_run_git", wraps=drive._run_git) as spy_git:
+                ctx1 = drive.inspect_git_context(wt_path)
+                self.assertEqual(spy_git.call_count, 1)
+                self.assertTrue(ctx1.is_git_repo)
+                self.assertTrue(ctx1.is_linked_worktree)
+                self.assertEqual(ctx1.git_root, wt_path.resolve())
+                self.assertEqual(ctx1.git_common_dir, (repo / ".git").resolve())
+                self.assertIsNotNone(ctx1.head_sha)
+
+                ctx2 = drive.inspect_git_context(wt_path)
+                self.assertEqual(spy_git.call_count, 1)
+                self.assertEqual(ctx1, ctx2)
+
+                plain_ctx = drive.inspect_git_context(non_git)
+                self.assertFalse(plain_ctx.is_git_repo)
+                self.assertEqual(spy_git.call_count, 2)
+                drive.inspect_git_context(non_git)
+                self.assertEqual(spy_git.call_count, 2)
+
+                unborn_ctx = drive.inspect_git_context(unborn)
+                self.assertTrue(unborn_ctx.is_git_repo)
+                self.assertFalse(unborn_ctx.is_linked_worktree)
+                self.assertEqual(unborn_ctx.git_root, unborn.resolve())
+                self.assertIsNone(unborn_ctx.head_sha)
+                self.assertEqual(spy_git.call_count, 4)
+
+                drive.clear_git_context_cache()
+                drive.inspect_git_context(wt_path)
+                self.assertEqual(spy_git.call_count, 5)
+
+            drive.remove_worktree(repo, wt_path, delete_branch=True)
 
     def test_build_review_cmd_selectors_and_prompt(self) -> None:
         base_cmd = self.adapter.build_review_cmd(
@@ -748,6 +919,48 @@ class DshAdapterTests(unittest.TestCase):
             self.assertEqual(payload["error"], "invalid_arguments")
             self.assertIn("--image", payload["message"])
 
+            for bad_args in (
+                [
+                    "run",
+                    "--worker",
+                    "dsh",
+                    "--mode",
+                    "scout",
+                    "--fast",
+                    "--cwd",
+                    td,
+                    "--prompt",
+                    "check",
+                ],
+                [
+                    "run",
+                    "--worker",
+                    "dsh",
+                    "--mode",
+                    "scout",
+                    "--daemon",
+                    "--cwd",
+                    td,
+                    "--prompt",
+                    "check",
+                ],
+                [
+                    "resume",
+                    "--worker",
+                    "dsh",
+                    "--session",
+                    "s-1",
+                    "--fast",
+                    "--cwd",
+                    td,
+                    "--prompt",
+                    "check",
+                ],
+            ):
+                bad_proc = _run_drive(bad_args)
+                self.assertEqual(bad_proc.returncode, drive.EXIT_INVALID_ARGS)
+                self.assertEqual(json.loads(bad_proc.stdout)["error"], "invalid_arguments")
+
     def test_parse_dsh_ndjson_fixtures(self) -> None:
         missing_cred_fixture = [
             json.dumps({"type": "session", "sessionId": "session-1763900000-01"}),
@@ -1147,22 +1360,44 @@ class RepositoryContractTests(unittest.TestCase):
 
         for template_name in ("scout-task.md", "ship-task.md", "bugfix-task.md"):
             self.assertIn(f"templates/{template_name}", skill_md)
-            self.assertTrue((SKILL_ROOT / "templates" / template_name).is_file())
+            tpl_path = SKILL_ROOT / "templates" / template_name
+            self.assertTrue(tpl_path.is_file())
+            tpl_text = tpl_path.read_text(encoding="utf-8")
+            self.assertTrue(
+                tpl_text.startswith(drive.SUBAGENT_DISPATCH_PREAMBLE),
+                f"{template_name} must start with SUBAGENT_DISPATCH_PREAMBLE",
+            )
         self.assertIn("2 `drive.py resume` rounds", skill_md)
         self.assertIn("read_file", skill_md)
+        self.assertIn("codex-driver", skill_md)
 
-        cold_start_files = [
-            SKILL_ROOT / "SKILL.md",
-            SKILL_ROOT / "workers" / "codex.md",
-            SKILL_ROOT / "hosts" / "antigravity.md",
-            SKILL_ROOT / "templates" / "bugfix-task.md",
-        ]
-        cold_start_bytes = sum(path.stat().st_size for path in cold_start_files)
-        self.assertLessEqual(
-            cold_start_bytes,
-            11500,
-            f"Cold-start skill bundle grew to {cold_start_bytes} bytes (budget <= 11500)",
-        )
+        for bundle_label, cold_start_files in (
+            (
+                "bugfix",
+                [
+                    SKILL_ROOT / "SKILL.md",
+                    SKILL_ROOT / "workers" / "codex.md",
+                    SKILL_ROOT / "hosts" / "antigravity.md",
+                    SKILL_ROOT / "templates" / "bugfix-task.md",
+                ],
+            ),
+            (
+                "ship+schema",
+                [
+                    SKILL_ROOT / "SKILL.md",
+                    SKILL_ROOT / "workers" / "codex.md",
+                    SKILL_ROOT / "hosts" / "antigravity.md",
+                    SKILL_ROOT / "templates" / "ship-task.md",
+                    SKILL_ROOT / "schemas" / "receipt.schema.json",
+                ],
+            ),
+        ):
+            cold_start_bytes = sum(path.stat().st_size for path in cold_start_files)
+            self.assertLessEqual(
+                cold_start_bytes,
+                11500,
+                f"Cold-start skill bundle ({bundle_label}) grew to {cold_start_bytes} bytes (budget <= 11500)",
+            )
 
         link_pattern = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
         for md_file in sorted(SKILL_ROOT.rglob("*.md")):
@@ -1314,6 +1549,8 @@ class _MockAppServer:
         unix_path: Path | None = None,
         max_frame_bytes: int = 16 * 1024 * 1024,
         no_rollout_thread_ids: set[str] | None = None,
+        empty_rollout_counts: dict[str, int] | None = None,
+        hard_resume_error_threads: dict[str, str] | None = None,
         replay_on_resume: list[dict] | None = None,
     ) -> None:
         self.threads = {t["id"]: dict(t) for t in threads}
@@ -1321,11 +1558,15 @@ class _MockAppServer:
         self.unix_path = unix_path
         self.max_frame_bytes = max_frame_bytes
         self.no_rollout_thread_ids = set(no_rollout_thread_ids or ())
+        self.empty_rollout_counts = dict(empty_rollout_counts or {})
+        self.hard_resume_error_threads = dict(hard_resume_error_threads or {})
         self.replay_on_resume = list(replay_on_resume or ())
         self.received_messages: list[dict] = []
         self.handshake_headers: list[dict[str, str]] = []
         self.pong_payloads: list[bytes] = []
         self.unsubscribed_threads: list[str] = []
+        self.archived_threads: list[str] = []
+        self.started_thread_params: list[dict] = []
         self.approval_responses: list[dict] = []
         self._stop = threading.Event()
 
@@ -1411,9 +1652,74 @@ class _MockAppServer:
                                 "result": {"thread": self.threads[tid]},
                             }
                         )
+                elif method == "thread/start":
+                    self.started_thread_params.append(dict(params))
+                    new_id = f"019d-started-{len(self.started_thread_params):04d}"
+                    raw_cwd = params.get("cwd") or "/tmp"
+                    created_thread = {
+                        "id": new_id,
+                        "cwd": raw_cwd,
+                        "name": "",
+                        "preview": "",
+                        "ephemeral": bool(params.get("ephemeral", False)),
+                        "parentThreadId": None,
+                        "source": "appServer",
+                        "model": params.get("model") or "gpt-6.2-codex",
+                        "updatedAt": int(time.time()),
+                        "createdAt": int(time.time()),
+                        "status": {"type": "idle"},
+                    }
+                    self.threads[new_id] = created_thread
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "result": {
+                                "thread": created_thread,
+                                "cwd": raw_cwd,
+                                "model": created_thread["model"],
+                                "modelProvider": "openai",
+                                "approvalPolicy": params.get("approvalPolicy") or "never",
+                                "approvalsReviewer": "user",
+                                "sandbox": {"type": "readOnly"}
+                                if params.get("sandbox") == "read-only"
+                                else {"type": "workspaceWrite"},
+                                "serviceTier": params.get("serviceTier"),
+                                "reasoningEffort": (params.get("config") or {}).get(
+                                    "model_reasoning_effort"
+                                ),
+                            },
+                        }
+                    )
                 elif method == "thread/resume":
                     tid = params["threadId"]
-                    if tid in self.no_rollout_thread_ids:
+                    if tid in self.hard_resume_error_threads:
+                        ws.send_json(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": req_id,
+                                "error": {
+                                    "code": -32603,
+                                    "message": self.hard_resume_error_threads[tid],
+                                },
+                            }
+                        )
+                    elif self.empty_rollout_counts.get(tid, 0) > 0:
+                        self.empty_rollout_counts[tid] -= 1
+                        ws.send_json(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": req_id,
+                                "error": {
+                                    "code": -32603,
+                                    "message": (
+                                        "failed to read session metadata: "
+                                        f"rollout at /tmp/sessions/rollout-{tid}.jsonl is empty"
+                                    ),
+                                },
+                            }
+                        )
+                    elif tid in self.no_rollout_thread_ids:
                         ws.send_json(
                             {
                                 "jsonrpc": "2.0",
@@ -1442,6 +1748,17 @@ class _MockAppServer:
                             "jsonrpc": "2.0",
                             "id": req_id,
                             "result": {"status": "unsubscribed"},
+                        }
+                    )
+                elif method == "thread/archive":
+                    tid = params["threadId"]
+                    self.archived_threads.append(tid)
+                    self.threads.pop(tid, None)
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "result": {},
                         }
                     )
                 elif method in {"thread/queue/add", "turn/start"}:
@@ -2705,6 +3022,597 @@ class TuiAttachTests(unittest.TestCase):
                 self.assertEqual(sim_proc.returncode, drive.EXIT_OK, sim_proc.stdout + sim_proc.stderr)
                 sim_data = json.loads(sim_proc.stdout)
                 self.assertEqual(sim_data["final_message"], "AGENT_TURN_TEXT")
+            finally:
+                srv.close()
+
+    def test_zero_turn_empty_rollout_minus_32603_recovery_and_hard_error_propagation(self) -> None:
+        self.assertTrue(
+            drive._is_unmaterialized_rollout_error(
+                drive.JsonRpcError(
+                    "thread/resume",
+                    -32603,
+                    "failed to read session metadata: rollout at /tmp/rollout-0.jsonl is empty",
+                )
+            )
+        )
+        self.assertTrue(
+            drive._is_unmaterialized_rollout_error(
+                drive.JsonRpcError("thread/resume", -32600, "No Rollout Found for thread id 123")
+            )
+        )
+        self.assertFalse(
+            drive._is_unmaterialized_rollout_error(
+                drive.JsonRpcError("thread/resume", -32603, "sqlite disk io error")
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory(dir="/tmp") as sock_td:
+            root = Path(td)
+            repo = _init_temp_repo(root)
+            codex_home = root / "codex-home"
+            (codex_home / "app-server-control").mkdir(parents=True)
+            real_sock = Path(sock_td) / "empty-rollout.sock"
+            (codex_home / "app-server-control" / "app-server-control.sock").symlink_to(real_sock)
+
+            threads = [
+                {
+                    "id": "thread-empty-rollout",
+                    "cwd": str(repo),
+                    "name": "Fresh 0-byte rollout TUI",
+                    "preview": "",
+                    "ephemeral": False,
+                    "parentThreadId": None,
+                    "source": "cli",
+                    "status": {"type": "idle"},
+                },
+                {
+                    "id": "thread-hard-error",
+                    "cwd": str(root),
+                    "name": "Broken thread",
+                    "preview": "",
+                    "ephemeral": False,
+                    "parentThreadId": None,
+                    "source": "cli",
+                    "status": {"type": "idle"},
+                },
+            ]
+
+            def on_dispatch(
+                ws: _MockWsConnection, method: str, req_id: int, params: dict, srv: _MockAppServer
+            ) -> None:
+                tid = params["threadId"]
+                cid = params["clientUserMessageId"]
+                ws.send_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "result": {"queuedSubmission": {"id": "q-emp", "clientUserMessageId": cid, "input": []}},
+                    }
+                )
+
+                def _emit_after_retry() -> None:
+                    time.sleep(0.08)
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "turn/started",
+                            "params": {"threadId": tid, "turn": {"id": "t-emp", "status": "inProgress"}},
+                        }
+                    )
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "item/started",
+                            "params": {
+                                "threadId": tid,
+                                "turnId": "t-emp",
+                                "item": {"id": "u-emp", "type": "userMessage", "clientId": cid},
+                            },
+                        }
+                    )
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "item/completed",
+                            "params": {
+                                "threadId": tid,
+                                "turnId": "t-emp",
+                                "item": {"id": "m-emp", "type": "agentMessage", "text": "RECOVERED_EMPTY_ROLLOUT"},
+                            },
+                        }
+                    )
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "turn/completed",
+                            "params": {"threadId": tid, "turn": {"id": "t-emp", "status": "completed"}},
+                        }
+                    )
+
+                threading.Thread(target=_emit_after_retry, daemon=True).start()
+
+            srv = _MockAppServer(
+                threads=threads,
+                on_dispatch=on_dispatch,
+                unix_path=real_sock,
+                empty_rollout_counts={"thread-empty-rollout": 3},
+                hard_resume_error_threads={"thread-hard-error": "sqlite disk io error"},
+            )
+            try:
+                env = {"CODEX_HOME": str(codex_home)}
+                ok_proc = _run_drive(
+                    [
+                        "attach",
+                        "--cwd",
+                        str(repo),
+                        "--mode",
+                        "scout",
+                        "--timeout",
+                        "3",
+                        "--prompt",
+                        "recover empty rollout",
+                    ],
+                    env=env,
+                )
+                self.assertEqual(ok_proc.returncode, drive.EXIT_OK, ok_proc.stdout + ok_proc.stderr)
+                ok_data = json.loads(ok_proc.stdout)
+                self.assertEqual(ok_data["status"], "completed")
+                self.assertEqual(ok_data["final_message"], "RECOVERED_EMPTY_ROLLOUT")
+                self.assertEqual(srv.empty_rollout_counts["thread-empty-rollout"], 0)
+                self.assertIn("thread-empty-rollout", srv.unsubscribed_threads)
+
+                hard_proc = _run_drive(
+                    [
+                        "attach",
+                        "--session",
+                        "thread-hard-error",
+                        "--mode",
+                        "scout",
+                        "--timeout",
+                        "2",
+                        "--prompt",
+                        "should fail closed",
+                    ],
+                    env=env,
+                )
+                self.assertEqual(hard_proc.returncode, drive.EXIT_ERROR)
+                hard_data = json.loads(hard_proc.stdout)
+                self.assertEqual(hard_data["error"], "runtime_error")
+                self.assertIn("sqlite disk io error", hard_data["message"])
+            finally:
+                srv.close()
+
+    def test_local_daemon_autostart_attach_create_and_run_daemon_fast(self) -> None:
+        receipt_obj = {
+            "summary": "Completed warm daemon ship slice.",
+            "changed_files": ["README.md"],
+            "verification": [{"command": "python3 -m unittest", "exit_code": 0, "summary": "ok"}],
+            "assumptions_and_risks": [],
+            "symbol_changes": [],
+        }
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory(dir="/tmp") as sock_td:
+            root = Path(td)
+            repo = _init_temp_repo(root)
+            codex_home = root / "codex-home"
+            codex_home.mkdir(parents=True)
+            real_sock = Path(sock_td) / "autostart.sock"
+            start_log = root / "daemon_starts.log"
+
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            fake_codex = fake_bin / "codex"
+            fake_codex.write_text(
+                f"#!{sys.executable}\n"
+                "import os, pathlib, sys\n"
+                "args = sys.argv[1:]\n"
+                "if args[:3] == ['app-server', 'daemon', 'start']:\n"
+                f"    open({str(start_log)!r}, 'a', encoding='utf-8').write('started\\n')\n"
+                "    ch = pathlib.Path(os.environ['CODEX_HOME']) / 'app-server-control'\n"
+                "    ch.mkdir(parents=True, exist_ok=True)\n"
+                "    sock = ch / 'app-server-control.sock'\n"
+                "    if not sock.exists():\n"
+                f"        sock.symlink_to(pathlib.Path({str(real_sock)!r}))\n"
+                "    sys.exit(0)\n"
+                "sys.exit(1)\n",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(fake_codex.stat().st_mode | stat.S_IXUSR)
+
+            dispatched_inputs: list[tuple[str, dict]] = []
+
+            def on_dispatch(
+                ws: _MockWsConnection, method: str, req_id: int, params: dict, srv: _MockAppServer
+            ) -> None:
+                dispatched_inputs.append((method, dict(params)))
+                tid = params["threadId"]
+                cid = params["clientUserMessageId"]
+                turn_id = f"turn-{len(dispatched_inputs)}"
+                if method == "turn/start":
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "result": {"turn": {"id": turn_id, "status": "inProgress"}},
+                        }
+                    )
+                else:
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "result": {"queuedSubmission": {"id": "q-1", "clientUserMessageId": cid, "input": []}},
+                        }
+                    )
+                ws.send_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "turn/started",
+                        "params": {"threadId": tid, "turn": {"id": turn_id, "status": "inProgress"}},
+                    }
+                )
+                ws.send_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "item/started",
+                        "params": {
+                            "threadId": tid,
+                            "turnId": turn_id,
+                            "item": {"id": "u1", "type": "userMessage", "clientId": cid},
+                        },
+                    }
+                )
+                reply_text = (
+                    json.dumps(receipt_obj)
+                    if "outputSchema" in params
+                    else f"warm reply on {tid}"
+                )
+                ws.send_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "item/completed",
+                        "params": {
+                            "threadId": tid,
+                            "turnId": turn_id,
+                            "item": {"id": "m1", "type": "agentMessage", "text": reply_text},
+                        },
+                    }
+                )
+                ws.send_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "turn/completed",
+                        "params": {"threadId": tid, "turn": {"id": turn_id, "status": "completed"}},
+                    }
+                )
+
+            srv = _MockAppServer(threads=[], on_dispatch=on_dispatch, unix_path=real_sock)
+            try:
+                git_dir = str(Path(drive.shutil.which("git") or "/usr/bin/git").parent)
+                env = {
+                    "CODEX_HOME": str(codex_home),
+                    "PATH": f"{fake_bin}:{git_dir}",
+                }
+
+                offline_ses = _run_drive(["sessions", "--cwd", str(repo)], env=env)
+                self.assertEqual(offline_ses.returncode, drive.EXIT_ERROR)
+                self.assertEqual(json.loads(offline_ses.stdout)["error"], "daemon_offline")
+                self.assertFalse(start_log.exists())
+
+                custom_remote_att = _run_drive(
+                    [
+                        "attach",
+                        "--cwd",
+                        str(repo),
+                        "--create",
+                        "--remote",
+                        f"unix://{root / 'custom-missing.sock'}",
+                        "--prompt",
+                        "do not autostart custom socket",
+                    ],
+                    env=env,
+                )
+                self.assertEqual(custom_remote_att.returncode, drive.EXIT_ERROR)
+                self.assertFalse(start_log.exists())
+
+                no_auto_att = _run_drive(
+                    [
+                        "attach",
+                        "--cwd",
+                        str(repo),
+                        "--create",
+                        "--no-auto-daemon",
+                        "--prompt",
+                        "opt out of autostart",
+                    ],
+                    env=env,
+                )
+                self.assertEqual(no_auto_att.returncode, drive.EXIT_ERROR)
+                self.assertFalse(start_log.exists())
+
+                created_att = _run_drive(
+                    [
+                        "attach",
+                        "--cwd",
+                        str(repo),
+                        "--create",
+                        "--fast",
+                        "--mode",
+                        "ship",
+                        "--effort",
+                        "high",
+                        "--model",
+                        "gpt-6.2-sol",
+                        "--prompt",
+                        "Create warm session and run slice.",
+                    ],
+                    env=env,
+                )
+                self.assertEqual(created_att.returncode, drive.EXIT_OK, created_att.stdout + created_att.stderr)
+                self.assertEqual(len(start_log.read_text(encoding="utf-8").splitlines()), 1)
+                created_summary = json.loads(created_att.stdout)
+                created_tid = created_summary["session_id"]
+                self.assertEqual(created_tid, "019d-started-0001")
+                self.assertEqual(created_summary["status"], "completed")
+                self.assertEqual(srv.archived_threads, [])
+                self.assertIn(created_tid, srv.unsubscribed_threads)
+                self.assertEqual(srv.started_thread_params[0]["cwd"], str(repo.resolve()))
+                self.assertEqual(srv.started_thread_params[0]["model"], "gpt-6.2-sol")
+                self.assertEqual(srv.started_thread_params[0]["sandbox"], "workspace-write")
+                self.assertEqual(srv.started_thread_params[0]["approvalPolicy"], "never")
+                self.assertEqual(srv.started_thread_params[0]["serviceTier"], "priority")
+                self.assertEqual(
+                    srv.started_thread_params[0]["config"],
+                    {"model_reasoning_effort": "high"},
+                )
+                first_method, first_turn = dispatched_inputs[0]
+                self.assertEqual(first_method, "turn/start")
+                self.assertEqual(first_turn["serviceTier"], "priority")
+                self.assertEqual(first_turn["effort"], "high")
+                self.assertTrue(
+                    first_turn["input"][0]["text"].startswith(drive.SUBAGENT_DISPATCH_PREAMBLE)
+                )
+
+                reuse_att = _run_drive(
+                    [
+                        "attach",
+                        "--cwd",
+                        str(repo),
+                        "--mode",
+                        "ship",
+                        "--prompt",
+                        "Second turn reuses warm session.",
+                    ],
+                    env=env,
+                )
+                self.assertEqual(reuse_att.returncode, drive.EXIT_OK, reuse_att.stdout + reuse_att.stderr)
+                self.assertEqual(json.loads(reuse_att.stdout)["session_id"], created_tid)
+                self.assertEqual(len(srv.started_thread_params), 1)
+
+                srv.threads["019d-second-ambig"] = {
+                    "id": "019d-second-ambig",
+                    "cwd": str(repo),
+                    "name": "Second TUI",
+                    "preview": "",
+                    "ephemeral": False,
+                    "parentThreadId": None,
+                    "source": "cli",
+                    "status": {"type": "idle"},
+                }
+                ambig_create = _run_drive(
+                    [
+                        "attach",
+                        "--cwd",
+                        str(repo),
+                        "--create",
+                        "--prompt",
+                        "must never create on ambiguous",
+                    ],
+                    env=env,
+                )
+                self.assertEqual(ambig_create.returncode, drive.EXIT_INVALID_ARGS)
+                self.assertEqual(json.loads(ambig_create.stdout)["error"], "ambiguous_tui_threads")
+                self.assertEqual(len(srv.started_thread_params), 1)
+                srv.threads.pop("019d-second-ambig", None)
+
+                schema_path = SKILL_ROOT / "schemas" / "receipt.schema.json"
+                daemon_run = _run_drive(
+                    [
+                        "run",
+                        "--worker",
+                        "codex",
+                        "--daemon",
+                        "--fast",
+                        "--mode",
+                        "ship",
+                        "--effort",
+                        "xhigh",
+                        "--model",
+                        "gpt-6.2-sol",
+                        "--schema",
+                        str(schema_path),
+                        "--cwd",
+                        str(repo),
+                        "--prompt",
+                        "Ephemeral daemon ship run.",
+                    ],
+                    env=env,
+                )
+                self.assertEqual(daemon_run.returncode, drive.EXIT_OK, daemon_run.stdout + daemon_run.stderr)
+                daemon_summary = json.loads(daemon_run.stdout)
+                daemon_tid = daemon_summary["session_id"]
+                self.assertEqual(daemon_tid, "019d-started-0002")
+                self.assertTrue(daemon_summary["receipt_valid"])
+                self.assertIn(daemon_tid, srv.unsubscribed_threads)
+                self.assertIn(daemon_tid, srv.archived_threads)
+                self.assertNotIn(daemon_tid, srv.threads)
+                self.assertEqual(
+                    srv.started_thread_params[1]["config"],
+                    {"model_reasoning_effort": "xhigh", "mcp_servers": {}},
+                )
+                self.assertEqual(srv.started_thread_params[1]["serviceTier"], "priority")
+
+                keep_loaded_run = _run_drive(
+                    [
+                        "run",
+                        "--worker",
+                        "codex",
+                        "--daemon",
+                        "--keep-loaded",
+                        "--with-mcp",
+                        "--raw-prompt",
+                        "--mode",
+                        "scout",
+                        "--cwd",
+                        str(repo),
+                        "--prompt",
+                        "Raw scout kept loaded.",
+                    ],
+                    env=env,
+                )
+                self.assertEqual(keep_loaded_run.returncode, drive.EXIT_OK)
+                kept_tid = json.loads(keep_loaded_run.stdout)["session_id"]
+                self.assertNotIn(kept_tid, srv.archived_threads)
+                self.assertIn(kept_tid, srv.threads)
+                self.assertEqual(
+                    srv.started_thread_params[2]["config"],
+                    {"model_reasoning_effort": "medium"},
+                )
+                self.assertEqual(srv.started_thread_params[2]["sandbox"], "read-only")
+                self.assertEqual(dispatched_inputs[-1][1]["input"][0]["text"], "Raw scout kept loaded.")
+
+                ensure_ses = _run_drive(["sessions", "--cwd", str(repo), "--ensure-daemon"], env=env)
+                self.assertEqual(ensure_ses.returncode, drive.EXIT_OK)
+                ses_ids = {s["thread_id"] for s in json.loads(ensure_ses.stdout)["sessions"]}
+                self.assertEqual(ses_ids, {created_tid, kept_tid})
+            finally:
+                srv.close()
+
+    def test_pipelined_request_batch_and_direct_session_id_resolution(self) -> None:
+        srv_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv_sock.bind(("127.0.0.1", 0))
+        port = srv_sock.getsockname()[1]
+        srv_sock.listen(2)
+        burst_verified = {"all_three_before_reply": False}
+
+        def _serve_pipelined() -> None:
+            conn, _ = srv_sock.accept()
+            ws = _MockWsConnection(conn)
+            try:
+                ws.handshake()
+                init_msg = ws.recv_json()
+                assert init_msg is not None
+                ws.send_json({"jsonrpc": "2.0", "id": init_msg["id"], "result": {"userAgent": "mock"}})
+                inited = ws.recv_json()
+                assert inited is not None and inited.get("method") == "initialized"
+
+                r1 = ws.recv_json()
+                r2 = ws.recv_json()
+                r3 = ws.recv_json()
+                assert r1 is not None and r2 is not None and r3 is not None
+                burst_verified["all_three_before_reply"] = True
+
+                ws.send_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "remoteControl/status/changed",
+                        "params": {"enabled": True},
+                    }
+                )
+                ws.send_json({"jsonrpc": "2.0", "id": r3["id"], "result": {"thread": {"id": "t3"}}})
+                ws.send_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": r2["id"],
+                        "error": {"code": -32600, "message": "unknown thread t2"},
+                    }
+                )
+                ws.send_json({"jsonrpc": "2.0", "id": r1["id"], "result": {"thread": {"id": "t1"}}})
+            finally:
+                with mock.patch.object(socket.socket, "close", wraps=conn.close):
+                    conn.close()
+                srv_sock.close()
+
+        t = threading.Thread(target=_serve_pipelined, daemon=True)
+        t.start()
+        endpoint = drive.resolve_daemon_endpoint(remote=f"ws://127.0.0.1:{port}/rpc")
+        rpc = drive.AppServerRpcClient(endpoint, connect_timeout=3.0)
+        try:
+            deadline = time.monotonic() + 3.0
+            rpc.initialize(deadline=deadline)
+            batch_out = rpc.request_batch(
+                [
+                    ("thread/read", {"threadId": "t1"}),
+                    ("thread/read", {"threadId": "t2"}),
+                    ("thread/read", {"threadId": "t3"}),
+                ],
+                deadline=deadline,
+            )
+            self.assertTrue(burst_verified["all_three_before_reply"])
+            self.assertEqual(len(batch_out), 3)
+            self.assertEqual(batch_out[0], {"thread": {"id": "t1"}})
+            self.assertIsInstance(batch_out[1], drive.JsonRpcError)
+            self.assertEqual(batch_out[2], {"thread": {"id": "t3"}})
+            self.assertTrue(rpc.has_pending())
+            notif = rpc.next_message(deadline=deadline)
+            self.assertEqual(notif.get("method"), "remoteControl/status/changed")
+        finally:
+            rpc.close()
+            t.join(timeout=2.0)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = _init_temp_repo(root)
+            threads = [
+                {
+                    "id": f"thread-other-{i}",
+                    "cwd": str(root),
+                    "name": f"Other {i}",
+                    "preview": "",
+                    "ephemeral": False,
+                    "parentThreadId": None,
+                    "source": "cli",
+                    "status": {"type": "idle"},
+                }
+                for i in range(4)
+            ] + [
+                {
+                    "id": "thread-target",
+                    "cwd": str(repo),
+                    "name": "Target",
+                    "preview": "",
+                    "ephemeral": False,
+                    "parentThreadId": None,
+                    "source": "cli",
+                    "status": {"type": "idle"},
+                }
+            ]
+            srv = _MockAppServer(threads=threads, unix_path=None)
+            try:
+                ep = drive.resolve_daemon_endpoint(remote=f"ws://127.0.0.1:{srv.port}/rpc")
+                client = drive.AppServerRpcClient(ep, connect_timeout=3.0)
+                try:
+                    dl = time.monotonic() + 3.0
+                    client.initialize(deadline=dl)
+                    res = drive._resolve_thread_with_client(
+                        rpc=client,
+                        endpoint=ep,
+                        codex_home=root / "empty-home",
+                        target_cwd=None,
+                        session_id="thread-target",
+                        select_latest=False,
+                        deadline=dl,
+                    )
+                    self.assertEqual(res.kind, "matched")
+                    assert res.thread is not None
+                    self.assertEqual(res.thread.thread_id, "thread-target")
+                    read_msgs = [
+                        m for m in srv.received_messages if m.get("method") == "thread/read"
+                    ]
+                    self.assertEqual(len(read_msgs), 1)
+                    self.assertEqual(read_msgs[0]["params"]["threadId"], "thread-target")
+                finally:
+                    client.close()
             finally:
                 srv.close()
 
