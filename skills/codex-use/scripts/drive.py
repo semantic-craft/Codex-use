@@ -2,21 +2,33 @@
 from __future__ import annotations
 
 import argparse
+import base64
+from collections import deque
 import contextlib
 import dataclasses
 from dataclasses import dataclass, field
-import fcntl
+try:
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None  # type: ignore[assignment]
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import selectors
 import shutil
+import socket
+import sqlite3
+import ssl
+import struct
 import subprocess
 import sys
 import tempfile
 import time
-from typing import Any, Iterable, Iterator, Literal, Protocol
+from typing import Any, Callable, Iterable, Iterator, Literal, Protocol
+import urllib.parse
+import uuid
 
 WorkerId = Literal["codex", "dsh"]
 RunMode = Literal["scout", "ship", "review"]
@@ -24,11 +36,57 @@ WriteMode = Literal["scout", "ship"]
 CodexEffort = Literal["medium", "high", "xhigh"]
 DshPermissionMode = Literal["read-only", "workspace-write", "danger-full-access"]
 ApprovalPolicy = Literal["ask", "never"]
+ThreadResolutionKind = Literal[
+    "matched",
+    "ambiguous",
+    "desktop_writer_lock",
+    "not_found",
+    "daemon_offline",
+]
+AttachOutcomeStatus = Literal[
+    "completed",
+    "failed",
+    "interrupted",
+    "approval_required",
+    "user_input_required",
+    "thread_closed",
+    "timeout",
+]
 
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_INVALID_ARGS = 2
 EXIT_LOCK_CONFLICT = 3
+
+NON_ORIGINATING_CLIENT_NAME = "codex-backend"
+WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+DEFAULT_MAX_WS_FRAME_BYTES = 16 * 1024 * 1024
+MAX_INBOUND_WS_MESSAGE_BYTES = 64 * 1024 * 1024
+MAX_WS_HANDSHAKE_BYTES = 65536
+DEFAULT_DISCOVERY_TIMEOUT = 10.0
+DEFAULT_ATTACH_TIMEOUT = 600.0
+APPROVAL_DETAIL_GRACE_SECONDS = 0.05
+OPT_OUT_NOTIFICATION_METHODS: tuple[str, ...] = (
+    "item/agentMessage/delta",
+    "item/reasoning/summaryTextDelta",
+    "item/reasoning/textDelta",
+    "item/plan/delta",
+)
+APPROVAL_REQUEST_METHODS: frozenset[str] = frozenset(
+    {
+        "item/commandExecution/requestApproval",
+        "item/fileChange/requestApproval",
+        "item/permissions/requestApproval",
+        "execCommandApproval",
+        "applyPatchApproval",
+    }
+)
+USER_INPUT_REQUEST_METHODS: frozenset[str] = frozenset(
+    {
+        "item/tool/requestUserInput",
+        "mcpServer/elicitation/request",
+    }
+)
 
 CODEX_ALLOWED_EFFORTS: frozenset[str] = frozenset({"medium", "high", "xhigh"})
 DSH_PERMISSION_MODES: frozenset[str] = frozenset(
@@ -97,6 +155,25 @@ class DriverRuntimeError(Exception):
     pass
 
 
+class DaemonOfflineError(DriverRuntimeError):
+    def __init__(self, message: str, endpoint: str) -> None:
+        super().__init__(message)
+        self.endpoint = endpoint
+
+
+class WebSocketClosedError(DriverRuntimeError):
+    pass
+
+
+class JsonRpcError(DriverRuntimeError):
+    def __init__(self, method: str, code: int | None, message: str, data: Any = None) -> None:
+        super().__init__(f"{method} failed ({code}): {message}")
+        self.method = method
+        self.code = code
+        self.rpc_message = message
+        self.data = data
+
+
 @dataclass(frozen=True)
 class CommandRecord:
     command: str
@@ -147,6 +224,101 @@ class AuditSummary:
     usage: dict[str, Any] | None
     raw_log: str
     command: list[str] = field(default_factory=list)
+    status: str | None = None
+
+
+@dataclass(frozen=True)
+class DaemonEndpoint:
+    transport: Literal["unix", "tcp", "tls"]
+    address: str
+    host_header: str
+    ws_path: str = "/rpc"
+    port: int | None = None
+    bearer_token: str | None = None
+
+    def display(self) -> str:
+        if self.transport == "unix":
+            return self.address
+        scheme = "wss" if self.transport == "tls" else "ws"
+        return f"{scheme}://{self.host_header}{self.ws_path}"
+
+
+@dataclass(frozen=True)
+class LoadedTuiThread:
+    thread_id: str
+    title: str
+    cwd: str
+    resolved_cwd: str
+    git_root: str | None
+    status: str
+    active_flags: tuple[str, ...] = ()
+    model: str | None = None
+    originator: str | None = None
+    source: str = "unknown"
+    updated_at: int = 0
+    created_at: int = 0
+
+    def to_candidate_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "thread_id": self.thread_id,
+            "title": self.title,
+            "cwd": self.cwd,
+            "status": self.status,
+        }
+        if self.active_flags:
+            payload["active_flags"] = list(self.active_flags)
+        if self.model:
+            payload["model"] = self.model
+        if self.originator:
+            payload["originator"] = self.originator
+        if self.updated_at:
+            payload["updated_at"] = self.updated_at
+        return payload
+
+
+@dataclass(frozen=True)
+class ThreadResolution:
+    kind: ThreadResolutionKind
+    thread: LoadedTuiThread | None = None
+    candidates: tuple[LoadedTuiThread, ...] = ()
+    locked_thread_ids: tuple[str, ...] = ()
+    endpoint: str | None = None
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class DaemonTurnObservation:
+    thread_id: str
+    turn_id: str | None
+    client_user_message_id: str
+    dispatch_method: Literal["thread/queue/add", "turn/start"]
+    queued_behind_active_turn: bool
+    status: AttachOutcomeStatus
+    commands: list[CommandRecord]
+    changed_files: list[str]
+    errors: list[str]
+    final_message: str
+    usage: dict[str, Any] | None
+    approval_request: dict[str, Any] | None = None
+    event_count: int = 0
+
+
+@dataclass(frozen=True)
+class AttachRequest:
+    worker: WorkerId
+    mode: WriteMode
+    cwd: Path | None
+    session_id: str | None = None
+    select_latest: bool = False
+    effort: str | None = None
+    model: str | None = None
+    schema_path: Path | None = None
+    output_last_message: Path | None = None
+    images: tuple[Path, ...] = ()
+    timeout: float = DEFAULT_ATTACH_TIMEOUT
+    wait_for_approval: bool = False
+    remote: str | None = None
+    remote_auth_token_env: str | None = None
 
 
 @dataclass(frozen=True)
@@ -236,13 +408,17 @@ def _append_unique(items: list[str], value: str) -> None:
 
 
 def _run_git(cwd: Path, args: list[str], timeout: float = 10.0) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", "-C", str(cwd), *args],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=timeout,
-    )
+    cmd = ["git", "-C", str(cwd), *args]
+    try:
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return subprocess.CompletedProcess(args=cmd, returncode=127, stdout="", stderr=str(exc))
 
 
 def inspect_git_context(cwd: Path) -> GitContext:
@@ -327,6 +503,9 @@ def resolve_ship_lock_path(cwd: Path) -> Path:
 def acquire_ship_lock(cwd: Path, mode: str) -> Iterator[Path]:
     lock_path = resolve_ship_lock_path(cwd)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
+    if fcntl is None:
+        yield lock_path
+        return
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
     try:
         try:
@@ -669,16 +848,60 @@ class CodexAdapter:
         usage: dict[str, Any] | None = None
         event_count = 0
 
+        parsed_events: list[dict[str, Any]] = []
+        attach_thread_id: str | None = None
+        attach_client_msg_id: str | None = None
+        attach_turn_id: str | None = None
+        attach_queued = False
+        attach_status: str | None = None
+
         for raw in lines:
             stripped = raw.strip()
             if not stripped:
                 continue
             try:
-                event = json.loads(stripped)
+                obj = json.loads(stripped)
             except json.JSONDecodeError:
                 continue
-            if not isinstance(event, dict):
+            if not isinstance(obj, dict):
                 continue
+            parsed_events.append(obj)
+            otype = obj.get("type")
+            if otype == "attach.session":
+                tid = obj.get("thread_id")
+                if isinstance(tid, str) and tid:
+                    attach_thread_id = tid
+                cid = obj.get("client_user_message_id")
+                if isinstance(cid, str) and cid:
+                    attach_client_msg_id = cid
+            elif otype == "attach.turn":
+                tid = obj.get("thread_id")
+                if isinstance(tid, str) and tid:
+                    attach_thread_id = tid
+                t_turn = obj.get("turn_id")
+                if isinstance(t_turn, str) and t_turn:
+                    attach_turn_id = t_turn
+                if isinstance(obj.get("queued_behind_active_turn"), bool):
+                    attach_queued = obj["queued_behind_active_turn"]
+                st = obj.get("status")
+                if isinstance(st, str) and st:
+                    attach_status = st
+
+        if attach_turn_id is None and attach_client_msg_id is not None:
+            for obj in parsed_events:
+                if obj.get("method") in {"item/started", "item/completed"}:
+                    p = obj.get("params") if isinstance(obj.get("params"), dict) else {}
+                    if attach_thread_id and p.get("threadId") != attach_thread_id:
+                        continue
+                    it = p.get("item")
+                    if isinstance(it, dict) and it.get("type") in {"userMessage", "user_message"}:
+                        if (it.get("clientId") or it.get("clientUserMessageId")) == attach_client_msg_id:
+                            cand_tid = p.get("turnId")
+                            if isinstance(cand_tid, str) and cand_tid:
+                                attach_turn_id = cand_tid
+                                break
+
+        for event in parsed_events:
             event_count += 1
             etype = event.get("type")
 
@@ -726,6 +949,68 @@ class CodexAdapter:
                 err_text = _extract_error_text(event) or _extract_error_text(event.get("error"))
                 if err_text:
                     _append_unique(errors, err_text)
+            elif etype in {"attach.session", "attach.turn"}:
+                tid = event.get("thread_id")
+                if isinstance(tid, str) and tid:
+                    session_id = tid
+                for extra_err in event.get("errors") or []:
+                    if isinstance(extra_err, str) and extra_err:
+                        _append_unique(errors, extra_err)
+            elif isinstance(event.get("method"), str):
+                method = event["method"]
+                params = event.get("params") if isinstance(event.get("params"), dict) else {}
+                tid = params.get("threadId") or params.get("conversationId")
+                if attach_thread_id is not None and isinstance(tid, str) and tid != attach_thread_id:
+                    continue
+                if isinstance(tid, str) and tid and session_id is None:
+                    session_id = tid
+
+                ev_turn_id = params.get("turnId")
+                if ev_turn_id is None and isinstance(params.get("turn"), dict):
+                    ev_turn_id = params["turn"].get("id")
+
+                if attach_turn_id is not None:
+                    turn_matches = ev_turn_id == attach_turn_id or (
+                        ev_turn_id is None and not attach_queued
+                    )
+                elif attach_queued or attach_client_msg_id is not None:
+                    turn_matches = False
+                else:
+                    turn_matches = True
+
+                if method == "item/completed" and turn_matches:
+                    item = params.get("item")
+                    if isinstance(item, dict):
+                        _ingest_app_server_item(item, commands, changed_files, errors, preview_limit)
+                        if item.get("type") in {"agentMessage", "agent_message"}:
+                            text = _extract_agent_text(item)
+                            if text:
+                                final_message = text
+                elif method == "thread/tokenUsage/updated" and turn_matches:
+                    tu = params.get("tokenUsage")
+                    if isinstance(tu, dict):
+                        last_u = tu.get("last")
+                        usage = last_u if isinstance(last_u, dict) else tu
+                elif method == "turn/completed" and turn_matches:
+                    turn_obj = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+                    if turn_obj.get("status") == "failed":
+                        err_text = _extract_error_text(turn_obj.get("error")) or "Turn failed."
+                        _append_unique(errors, err_text)
+                    elif turn_obj.get("status") == "interrupted":
+                        _append_unique(errors, "turn_interrupted: Turn was interrupted in live TUI.")
+                elif method == "error" and not params.get("willRetry", False) and turn_matches:
+                    err_text = _extract_error_text(params.get("error")) or _extract_error_text(params)
+                    if err_text:
+                        _append_unique(errors, err_text)
+                elif (
+                    "id" in event
+                    and method in (APPROVAL_REQUEST_METHODS | USER_INPUT_REQUEST_METHODS)
+                    and (
+                        turn_matches
+                        or attach_status in {"approval_required", "user_input_required"}
+                    )
+                ):
+                    _append_unique(errors, _format_interactive_block_message(method, params))
 
         return ParsedEvents(
             session_id=session_id,
@@ -1362,11 +1647,1583 @@ def _compact_command_record(record: CommandRecord) -> CommandRecord:
 
 def _serialize_audit_summary(summary: AuditSummary, full_output: bool) -> dict[str, Any]:
     data = dataclasses.asdict(summary)
+    if data.get("status") is None:
+        data.pop("status", None)
     if not full_output:
         for cmd_entry in data["commands"]:
             if cmd_entry.get("exit_code") == 0 and cmd_entry.get("output_preview") == "":
                 cmd_entry.pop("output_preview", None)
     return data
+
+
+def _ingest_app_server_item(
+    item: dict[str, Any],
+    commands: list[CommandRecord],
+    changed_files: list[str],
+    errors: list[str],
+    preview_limit: int,
+) -> None:
+    itype = item.get("type")
+    if itype in {"commandExecution", "command_execution"}:
+        raw_exit = item.get("exitCode") if "exitCode" in item else item.get("exit_code")
+        exit_code = raw_exit if isinstance(raw_exit, int) and not isinstance(raw_exit, bool) else None
+        out = (
+            item.get("aggregatedOutput")
+            if item.get("aggregatedOutput") is not None
+            else (item.get("aggregated_output") or item.get("output") or "")
+        )
+        commands.append(
+            CommandRecord(
+                command=str(item.get("command") or ""),
+                exit_code=exit_code,
+                status=str(item.get("status") or ""),
+                output_preview=_preview(out, limit=preview_limit),
+            )
+        )
+    elif itype in {"fileChange", "file_change"}:
+        _extract_file_change_paths(item, changed_files)
+    elif itype == "error":
+        msg = _extract_error_text(item) or str(item)
+        _append_unique(errors, msg)
+
+
+def _format_interactive_block_message(method: str, params: dict[str, Any]) -> str:
+    prefix = "user_input_required" if method in USER_INPUT_REQUEST_METHODS else "approval_required"
+    details: list[str] = [method]
+    cmd = params.get("command")
+    if isinstance(cmd, str) and cmd.strip():
+        details.append(f"command={_preview(cmd, limit=80)}")
+    reason = params.get("reason") or params.get("message") or params.get("title")
+    if isinstance(reason, str) and reason.strip():
+        details.append(f"reason={_preview(reason, limit=80)}")
+    questions = params.get("questions")
+    if isinstance(questions, list) and questions:
+        first_q = questions[0]
+        if isinstance(first_q, dict) and isinstance(first_q.get("question"), str):
+            details.append(f"question={_preview(first_q['question'], limit=80)}")
+    joined = ", ".join(details)
+    return f"{prefix}: Live TUI session is waiting for terminal interaction ({joined})."
+
+
+def _xor_mask(payload: bytes, mask: bytes) -> bytes:
+    length = len(payload)
+    if length == 0:
+        return b""
+    repeated = (mask * (length // 4 + 1))[:length]
+    masked_int = int.from_bytes(payload, "big") ^ int.from_bytes(repeated, "big")
+    return masked_int.to_bytes(length, "big")
+
+
+def _resolve_codex_home() -> Path:
+    raw = os.environ.get("CODEX_HOME")
+    if raw and raw.strip():
+        return Path(raw).expanduser()
+    return Path.home() / ".codex"
+
+
+def _probe_daemon_socket_from_cli() -> Path | None:
+    binary, _ = _resolve_codex_binary()
+    if not binary:
+        return None
+    try:
+        res = subprocess.run(
+            [binary, "app-server", "daemon", "version"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=3.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if res.returncode != 0:
+        return None
+    first_line = (res.stdout or "").strip().splitlines()
+    if not first_line:
+        return None
+    try:
+        data = json.loads(first_line[0])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict) or data.get("status") != "running":
+        return None
+    sock_path = data.get("socketPath")
+    return Path(sock_path) if isinstance(sock_path, str) and sock_path else None
+
+
+def resolve_daemon_endpoint(
+    remote: str | None = None,
+    remote_auth_token_env: str | None = None,
+    codex_home: Path | None = None,
+) -> DaemonEndpoint:
+    bearer_token: str | None = None
+    if remote_auth_token_env:
+        token = os.environ.get(remote_auth_token_env, "").strip()
+        if not token:
+            raise ValidationError(
+                f"Environment variable {remote_auth_token_env!r} for --remote-auth-token-env is empty or unset."
+            )
+        bearer_token = token
+
+    home = codex_home if codex_home is not None else _resolve_codex_home()
+    default_sock = home / "app-server-control" / "app-server-control.sock"
+
+    if remote is None or remote == "unix://":
+        sock_candidate = default_sock
+        if not sock_candidate.exists():
+            cli_sock = _probe_daemon_socket_from_cli()
+            if cli_sock is not None:
+                sock_candidate = cli_sock
+        return DaemonEndpoint(
+            transport="unix",
+            address=str(sock_candidate),
+            host_header="localhost",
+            ws_path="/rpc",
+            bearer_token=bearer_token,
+        )
+
+    if remote.startswith("unix://"):
+        raw_sock = remote[len("unix://") :]
+        if not raw_sock.startswith("/"):
+            raise ValidationError(
+                f"Invalid unix endpoint {remote!r}. Expected 'unix://' or 'unix:///absolute/path'."
+            )
+        return DaemonEndpoint(
+            transport="unix",
+            address=raw_sock,
+            host_header="localhost",
+            ws_path="/rpc",
+            bearer_token=bearer_token,
+        )
+
+    parsed = urllib.parse.urlsplit(remote)
+    if parsed.scheme not in {"ws", "wss"} or not parsed.hostname:
+        raise ValidationError(
+            f"Unsupported --remote address {remote!r}. Use ws://host:port[/path], wss://host:port[/path], or unix:///path."
+        )
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValidationError(f"Invalid port in --remote address {remote!r}.") from exc
+    resolved_port = port if port is not None else (443 if parsed.scheme == "wss" else 80)
+    host_only = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+    default_port = 443 if parsed.scheme == "wss" else 80
+    host_header = host_only if resolved_port == default_port else f"{host_only}:{resolved_port}"
+    ws_path = parsed.path or "/rpc"
+    if parsed.query:
+        ws_path = f"{ws_path}?{parsed.query}"
+    return DaemonEndpoint(
+        transport="tls" if parsed.scheme == "wss" else "tcp",
+        address=parsed.hostname,
+        host_header=host_header,
+        ws_path=ws_path,
+        port=resolved_port,
+        bearer_token=bearer_token,
+    )
+
+
+class Rfc6455Client:
+    def __init__(self, endpoint: DaemonEndpoint, connect_timeout: float = 5.0) -> None:
+        self.endpoint = endpoint
+        self.sock = self._connect_socket(endpoint, connect_timeout)
+        self.selector = selectors.DefaultSelector()
+        self._rx_buf = bytearray()
+        self._closed = False
+        self.max_outbound_frame_bytes = DEFAULT_MAX_WS_FRAME_BYTES
+        try:
+            self.sock.setblocking(False)
+            self.selector.register(self.sock, selectors.EVENT_READ)
+            self._perform_handshake(time.monotonic() + connect_timeout)
+        except Exception:
+            self.close()
+            raise
+
+    @staticmethod
+    def _connect_socket(endpoint: DaemonEndpoint, timeout: float) -> socket.socket:
+        if endpoint.transport == "unix":
+            if not hasattr(socket, "AF_UNIX"):
+                raise DaemonOfflineError(
+                    "Unix domain sockets (AF_UNIX) are unavailable on this platform; pass --remote ws://host:port.",
+                    endpoint.display(),
+                )
+            sock_path = Path(endpoint.address)
+            if not sock_path.exists():
+                raise DaemonOfflineError(
+                    f"Codex daemon control socket not found at {sock_path}.",
+                    endpoint.display(),
+                )
+            real_target = os.path.realpath(str(sock_path))
+            raw_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            raw_sock.settimeout(timeout)
+            try:
+                raw_sock.connect(real_target)
+            except OSError as exc:
+                raw_sock.close()
+                raise DaemonOfflineError(
+                    f"Cannot connect to Codex daemon socket {sock_path}: {exc}",
+                    endpoint.display(),
+                ) from exc
+            return raw_sock
+
+        assert endpoint.port is not None
+        try:
+            tcp_sock = socket.create_connection((endpoint.address, endpoint.port), timeout=timeout)
+        except OSError as exc:
+            raise DaemonOfflineError(
+                f"Cannot connect to remote Codex app-server {endpoint.display()}: {exc}",
+                endpoint.display(),
+            ) from exc
+        if endpoint.transport == "tls":
+            try:
+                ctx = ssl.create_default_context()
+                return ctx.wrap_socket(tcp_sock, server_hostname=endpoint.address)
+            except OSError as exc:
+                tcp_sock.close()
+                raise DaemonOfflineError(
+                    f"TLS handshake failed for {endpoint.display()}: {exc}",
+                    endpoint.display(),
+                ) from exc
+        return tcp_sock
+
+    def _perform_handshake(self, deadline: float) -> None:
+        sec_key = base64.b64encode(os.urandom(16)).decode("ascii")
+        expected_accept = base64.b64encode(
+            hashlib.sha1((sec_key + WS_GUID).encode("ascii")).digest()
+        ).decode("ascii")
+        headers = [
+            f"GET {self.endpoint.ws_path} HTTP/1.1",
+            f"Host: {self.endpoint.host_header}",
+            "Upgrade: websocket",
+            "Connection: Upgrade",
+            f"Sec-WebSocket-Key: {sec_key}",
+            "Sec-WebSocket-Version: 13",
+        ]
+        if self.endpoint.bearer_token:
+            headers.append(f"Authorization: Bearer {self.endpoint.bearer_token}")
+        raw_req = ("\r\n".join(headers) + "\r\n\r\n").encode("ascii")
+        self._write_all(raw_req, deadline)
+
+        while b"\r\n\r\n" not in self._rx_buf:
+            if len(self._rx_buf) > MAX_WS_HANDSHAKE_BYTES:
+                raise DriverRuntimeError("WebSocket HTTP upgrade header exceeded 64 KiB.")
+            self._fill_rx_once(deadline)
+
+        header_end = self._rx_buf.index(b"\r\n\r\n")
+        raw_head = bytes(self._rx_buf[:header_end]).decode("iso-8859-1", errors="replace")
+        del self._rx_buf[: header_end + 4]
+
+        lines = raw_head.split("\r\n")
+        status_line = lines[0] if lines else ""
+        parts = status_line.split(" ", 2)
+        if len(parts) < 2 or parts[1] != "101":
+            raise DriverRuntimeError(f"WebSocket upgrade rejected by daemon: {status_line!r}")
+
+        parsed_headers: dict[str, str] = {}
+        for line in lines[1:]:
+            if ":" in line:
+                k, v = line.split(":", 1)
+                parsed_headers[k.strip().lower()] = v.strip()
+
+        accept_val = parsed_headers.get("sec-websocket-accept")
+        if accept_val is not None and accept_val != expected_accept:
+            raise DriverRuntimeError("WebSocket Sec-WebSocket-Accept mismatch during handshake.")
+
+        max_bytes_raw = parsed_headers.get("x-codex-websocket-max-unfragmented-message-bytes")
+        if max_bytes_raw:
+            with contextlib.suppress(ValueError):
+                parsed_max = int(max_bytes_raw)
+                if parsed_max > 0:
+                    self.max_outbound_frame_bytes = parsed_max
+
+    def _wait_io(self, event_mask: int, deadline: float) -> None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Timed out waiting on Codex app-server WebSocket.")
+        self.selector.modify(self.sock, event_mask)
+        try:
+            ready = self.selector.select(remaining)
+        finally:
+            if not self._closed:
+                with contextlib.suppress(OSError, KeyError, ValueError):
+                    self.selector.modify(self.sock, selectors.EVENT_READ)
+        if not ready:
+            raise TimeoutError("Timed out waiting on Codex app-server WebSocket.")
+
+    def _write_all(self, data: bytes, deadline: float) -> None:
+        view = memoryview(data)
+        sent_total = 0
+        length = len(data)
+        while sent_total < length:
+            try:
+                sent = self.sock.send(view[sent_total:])
+                if sent == 0:
+                    raise WebSocketClosedError("WebSocket closed while sending frame.")
+                sent_total += sent
+            except (BlockingIOError, ssl.SSLWantWriteError):
+                self._wait_io(selectors.EVENT_WRITE, deadline)
+            except ssl.SSLWantReadError:
+                self._wait_io(selectors.EVENT_READ, deadline)
+            except OSError as exc:
+                raise WebSocketClosedError(f"WebSocket write failed: {exc}") from exc
+
+    def _fill_rx_once(self, deadline: float) -> None:
+        while True:
+            try:
+                chunk = self.sock.recv(65536)
+                if not chunk:
+                    raise WebSocketClosedError("Codex app-server closed the WebSocket connection.")
+                self._rx_buf.extend(chunk)
+                if isinstance(self.sock, ssl.SSLSocket):
+                    while self.sock.pending() > 0:
+                        extra = self.sock.recv(65536)
+                        if not extra:
+                            break
+                        self._rx_buf.extend(extra)
+                return
+            except (BlockingIOError, ssl.SSLWantReadError):
+                self._wait_io(selectors.EVENT_READ, deadline)
+            except ssl.SSLWantWriteError:
+                self._wait_io(selectors.EVENT_WRITE, deadline)
+            except OSError as exc:
+                raise WebSocketClosedError(f"WebSocket read failed: {exc}") from exc
+
+    def send_frame(self, opcode: int, payload: bytes, deadline: float) -> None:
+        length = len(payload)
+        if opcode == 0x1 and length > self.max_outbound_frame_bytes:
+            raise ValidationError(
+                f"Outbound JSON-RPC message ({length} bytes) exceeds daemon frame limit ({self.max_outbound_frame_bytes} bytes)."
+            )
+        mask = os.urandom(4)
+        first_byte = 0x80 | (opcode & 0x0F)
+        if length < 126:
+            header = bytes([first_byte, 0x80 | length])
+        elif length < 65536:
+            header = bytes([first_byte, 0x80 | 126]) + struct.pack(">H", length)
+        else:
+            header = bytes([first_byte, 0x80 | 127]) + struct.pack(">Q", length)
+        masked_payload = _xor_mask(payload, mask)
+        self._write_all(header + mask + masked_payload, deadline)
+
+    def _try_extract_frame(self) -> tuple[bool, int, bytes] | None:
+        buf_len = len(self._rx_buf)
+        if buf_len < 2:
+            return None
+        b0 = self._rx_buf[0]
+        b1 = self._rx_buf[1]
+        fin = bool(b0 & 0x80)
+        opcode = b0 & 0x0F
+        masked = bool(b1 & 0x80)
+        length = b1 & 0x7F
+        offset = 2
+        if length == 126:
+            if buf_len < 4:
+                return None
+            length = struct.unpack(">H", self._rx_buf[2:4])[0]
+            offset = 4
+        elif length == 127:
+            if buf_len < 10:
+                return None
+            length = struct.unpack(">Q", self._rx_buf[2:10])[0]
+            offset = 10
+        if length > MAX_INBOUND_WS_MESSAGE_BYTES:
+            raise DriverRuntimeError(f"Inbound WebSocket frame ({length} bytes) exceeds safety limit.")
+        mask_len = 4 if masked else 0
+        total_needed = offset + mask_len + length
+        if buf_len < total_needed:
+            return None
+        mask_bytes = bytes(self._rx_buf[offset : offset + 4]) if masked else b""
+        payload = bytes(self._rx_buf[offset + mask_len : total_needed])
+        del self._rx_buf[:total_needed]
+        if masked:
+            payload = _xor_mask(payload, mask_bytes)
+        return fin, opcode, payload
+
+    def recv_text(self, deadline: float) -> str:
+        fragments: list[bytes] = []
+        total_bytes = 0
+        expecting_continuation = False
+        while True:
+            frame = self._try_extract_frame()
+            if frame is None:
+                self._fill_rx_once(deadline)
+                continue
+            fin, opcode, payload = frame
+            if opcode == 0x9:
+                self.send_frame(0xA, payload[:125], min(deadline, time.monotonic() + 2.0))
+                continue
+            if opcode == 0xA:
+                continue
+            if opcode == 0x8:
+                with contextlib.suppress(Exception):
+                    self.send_frame(0x8, b"", time.monotonic() + 1.0)
+                raise WebSocketClosedError("Codex app-server closed the WebSocket session.")
+            if opcode == 0x1:
+                if expecting_continuation:
+                    raise DriverRuntimeError("Received unexpected new text frame mid-fragmentation.")
+                fragments.append(payload)
+                total_bytes += len(payload)
+                if fin:
+                    return b"".join(fragments).decode("utf-8", errors="replace")
+                expecting_continuation = True
+            elif opcode == 0x0:
+                if not expecting_continuation:
+                    raise DriverRuntimeError("Received unexpected WebSocket continuation frame.")
+                fragments.append(payload)
+                total_bytes += len(payload)
+                if total_bytes > MAX_INBOUND_WS_MESSAGE_BYTES:
+                    raise DriverRuntimeError("Fragmented WebSocket message exceeded safety limit.")
+                if fin:
+                    return b"".join(fragments).decode("utf-8", errors="replace")
+            else:
+                raise DriverRuntimeError(f"Unsupported WebSocket frame opcode: {opcode:#x}")
+
+    def wait_readable(self, timeout: float) -> bool:
+        if self._rx_buf:
+            return True
+        if timeout <= 0:
+            return False
+        return bool(self.selector.select(timeout))
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        with contextlib.suppress(Exception):
+            self.send_frame(0x8, b"", time.monotonic() + 0.5)
+        with contextlib.suppress(Exception):
+            self.selector.unregister(self.sock)
+        with contextlib.suppress(Exception):
+            self.selector.close()
+        with contextlib.suppress(Exception):
+            self.sock.close()
+
+
+class AppServerRpcClient:
+    def __init__(self, endpoint: DaemonEndpoint, connect_timeout: float = 5.0) -> None:
+        self.ws = Rfc6455Client(endpoint, connect_timeout=connect_timeout)
+        self._next_id = 1
+        self._pending: deque[dict[str, Any]] = deque()
+        self._log_sink: Callable[[dict[str, Any]], None] | None = None
+
+    def set_log_sink(self, sink: Callable[[dict[str, Any]], None] | None) -> None:
+        self._log_sink = sink
+        if sink is not None:
+            for buffered in self._pending:
+                sink(buffered)
+
+    def _record(self, msg: dict[str, Any]) -> None:
+        if self._log_sink is not None:
+            self._log_sink(msg)
+
+    def send_notification(self, method: str, params: dict[str, Any] | None, deadline: float) -> None:
+        payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            payload["params"] = params
+        raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.ws.send_frame(0x1, raw, deadline)
+
+    def request(self, method: str, params: dict[str, Any] | None, deadline: float) -> dict[str, Any]:
+        req_id = self._next_id
+        self._next_id += 1
+        payload: dict[str, Any] = {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "method": method,
+            "params": params if params is not None else {},
+        }
+        raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.ws.send_frame(0x1, raw, deadline)
+        while True:
+            text = self.ws.recv_text(deadline)
+            try:
+                msg = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("id") == req_id and "method" not in msg and ("result" in msg or "error" in msg):
+                if "error" in msg:
+                    err_obj = msg.get("error")
+                    code = err_obj.get("code") if isinstance(err_obj, dict) else None
+                    err_msg = (
+                        str(err_obj.get("message") or err_obj)
+                        if isinstance(err_obj, dict)
+                        else str(err_obj)
+                    )
+                    err_data = err_obj.get("data") if isinstance(err_obj, dict) else None
+                    raise JsonRpcError(method, code if isinstance(code, int) else None, err_msg, err_data)
+                res = msg.get("result")
+                return res if isinstance(res, dict) else {"value": res}
+            self._record(msg)
+            self._pending.append(msg)
+
+    def initialize(self, deadline: float) -> dict[str, Any]:
+        res = self.request(
+            "initialize",
+            {
+                "clientInfo": {
+                    "name": NON_ORIGINATING_CLIENT_NAME,
+                    "title": "codex-use",
+                    "version": "0.1.0",
+                },
+                "capabilities": {
+                    "experimentalApi": True,
+                    "optOutNotificationMethods": list(OPT_OUT_NOTIFICATION_METHODS),
+                },
+            },
+            deadline=deadline,
+        )
+        self.send_notification("initialized", None, deadline=deadline)
+        return res
+
+    def next_message(self, deadline: float) -> dict[str, Any]:
+        if self._pending:
+            return self._pending.popleft()
+        while True:
+            text = self.ws.recv_text(deadline)
+            try:
+                msg = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(msg, dict):
+                self._record(msg)
+                return msg
+
+    def has_pending(self) -> bool:
+        return bool(self._pending)
+
+    def has_pending_turn_completed(self, thread_id: str) -> bool:
+        for msg in self._pending:
+            if msg.get("method") == "turn/completed":
+                params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+                if params.get("threadId") == thread_id:
+                    return True
+        return False
+
+    def wait_readable(self, timeout: float) -> bool:
+        if self._pending:
+            return True
+        return self.ws.wait_readable(timeout)
+
+    def unsubscribe_quietly(self, thread_id: str) -> None:
+        with contextlib.suppress(Exception):
+            self.request(
+                "thread/unsubscribe",
+                {"threadId": thread_id},
+                deadline=time.monotonic() + 2.0,
+            )
+
+    def close(self) -> None:
+        self.ws.close()
+
+
+def _normalize_source_label(raw_source: Any) -> str:
+    if isinstance(raw_source, str) and raw_source:
+        return raw_source
+    if isinstance(raw_source, dict):
+        if "custom" in raw_source and isinstance(raw_source["custom"], str):
+            return f"custom:{raw_source['custom']}"
+        if "subAgent" in raw_source:
+            return "subAgent"
+    return "unknown"
+
+
+def _is_subagent_or_ephemeral_thread(thread_obj: dict[str, Any]) -> bool:
+    if bool(thread_obj.get("ephemeral")):
+        return True
+    if thread_obj.get("parentThreadId") is not None:
+        return True
+    raw_source = thread_obj.get("source")
+    if isinstance(raw_source, dict) and "subAgent" in raw_source:
+        return True
+    return False
+
+
+def _parse_loaded_tui_thread(thread_obj: dict[str, Any]) -> LoadedTuiThread | None:
+    tid = thread_obj.get("id")
+    raw_cwd = thread_obj.get("cwd")
+    if not isinstance(tid, str) or not tid or not isinstance(raw_cwd, str) or not raw_cwd:
+        return None
+    status_raw = thread_obj.get("status")
+    if isinstance(status_raw, dict):
+        status_type = str(status_raw.get("type") or "unknown")
+        flags_raw = status_raw.get("activeFlags")
+        flags = (
+            tuple(str(x) for x in flags_raw if isinstance(x, str))
+            if isinstance(flags_raw, list)
+            else ()
+        )
+    elif isinstance(status_raw, str):
+        status_type = status_raw
+        flags = ()
+    else:
+        status_type = "unknown"
+        flags = ()
+    if status_type == "notLoaded":
+        return None
+
+    cwd_path = Path(raw_cwd)
+    resolved_cwd = str(cwd_path.resolve()) if cwd_path.exists() else os.path.realpath(raw_cwd)
+    git_ctx = inspect_git_context(Path(resolved_cwd))
+    git_root = str(git_ctx.git_root) if git_ctx.is_git_repo and git_ctx.git_root else None
+    raw_name = thread_obj.get("name")
+    title = (
+        raw_name.strip()
+        if isinstance(raw_name, str) and raw_name.strip()
+        else _preview(thread_obj.get("preview") or "", limit=80)
+    )
+    updated_at = thread_obj.get("updatedAt")
+    created_at = thread_obj.get("createdAt")
+    return LoadedTuiThread(
+        thread_id=tid,
+        title=title,
+        cwd=raw_cwd,
+        resolved_cwd=resolved_cwd,
+        git_root=git_root,
+        status=status_type,
+        active_flags=flags,
+        model=thread_obj.get("model") if isinstance(thread_obj.get("model"), str) else None,
+        originator=(
+            thread_obj.get("originator") if isinstance(thread_obj.get("originator"), str) else None
+        ),
+        source=_normalize_source_label(thread_obj.get("source")),
+        updated_at=updated_at if isinstance(updated_at, int) else 0,
+        created_at=created_at if isinstance(created_at, int) else 0,
+    )
+
+
+def _cwd_matches_target(candidate_cwd: str, target_resolved: Path, target_git_root: Path | None) -> bool:
+    cand_path = Path(candidate_cwd)
+    cand_resolved = cand_path.resolve() if cand_path.exists() else Path(os.path.realpath(candidate_cwd))
+    if cand_resolved == target_resolved:
+        return True
+    if target_git_root is not None:
+        cand_git = inspect_git_context(cand_resolved)
+        if cand_git.is_git_repo and cand_git.git_root == target_git_root:
+            return True
+    return False
+
+
+def _thread_matches_target_cwd(
+    thread: LoadedTuiThread, target_resolved: Path, target_git_root: Path | None
+) -> bool:
+    if Path(thread.resolved_cwd) == target_resolved:
+        return True
+    if target_git_root is not None and thread.git_root == str(target_git_root):
+        return True
+    return False
+
+
+def _is_writer_lock_held(lock_path: Path) -> bool:
+    if fcntl is None or not lock_path.is_file():
+        return False
+    fd: int | None = None
+    for open_flags in (os.O_RDWR, os.O_RDONLY):
+        try:
+            fd = os.open(str(lock_path), open_flags)
+            break
+        except OSError:
+            continue
+    if fd is None:
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return False
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+
+def _sqlite_state_sort_key(path: Path) -> tuple[int, float]:
+    match = re.search(r"(\d+)", path.stem)
+    version_num = int(match.group(1)) if match else -1
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    return (version_num, mtime)
+
+
+def _lookup_thread_cwd_from_codex_home(
+    codex_home: Path,
+    thread_id: str,
+    rpc: AppServerRpcClient | None = None,
+    deadline: float | None = None,
+) -> str | None:
+    if rpc is not None and deadline is not None:
+        with contextlib.suppress(Exception):
+            read_res = rpc.request(
+                "thread/read",
+                {"threadId": thread_id, "includeTurns": False},
+                deadline=min(deadline, time.monotonic() + 2.0),
+            )
+            th = read_res.get("thread") if isinstance(read_res.get("thread"), dict) else read_res
+            if isinstance(th, dict) and isinstance(th.get("cwd"), str) and th["cwd"]:
+                return th["cwd"]
+
+    for db_path in sorted(codex_home.glob("state*.sqlite"), key=_sqlite_state_sort_key, reverse=True):
+        with contextlib.suppress(sqlite3.Error, OSError):
+            uri = f"file:{urllib.parse.quote(str(db_path.resolve()))}?mode=ro"
+            con = sqlite3.connect(uri, uri=True, timeout=0.5)
+            try:
+                row = con.execute("SELECT cwd FROM threads WHERE id = ? LIMIT 1", (thread_id,)).fetchone()
+                if row and isinstance(row[0], str) and row[0]:
+                    return row[0]
+            finally:
+                con.close()
+
+    sessions_dir = codex_home / "sessions"
+    if sessions_dir.is_dir():
+        for rollout in sessions_dir.rglob(f"*{thread_id}.jsonl"):
+            with contextlib.suppress(OSError, json.JSONDecodeError):
+                with rollout.open("r", encoding="utf-8", errors="replace") as f:
+                    first_line = f.readline().strip()
+                if not first_line:
+                    continue
+                meta = json.loads(first_line)
+                if isinstance(meta, dict):
+                    payload = meta.get("payload")
+                    if isinstance(payload, dict) and isinstance(payload.get("cwd"), str):
+                        return payload["cwd"]
+                    if isinstance(meta.get("cwd"), str):
+                        return meta["cwd"]
+    return None
+
+
+def _find_conflicting_writer_locks(
+    codex_home: Path,
+    target_cwd: Path | None,
+    session_id: str | None,
+    excluded_ids: set[str],
+    rpc: AppServerRpcClient | None = None,
+    deadline: float | None = None,
+) -> list[str]:
+    locks_dir = codex_home / "thread-writer-locks"
+    if not locks_dir.is_dir():
+        return []
+
+    if session_id:
+        if session_id in excluded_ids:
+            return []
+        lock_file = locks_dir / f"{session_id}.lock"
+        return [session_id] if _is_writer_lock_held(lock_file) else []
+
+    held_ids: list[str] = []
+    for lock_file in sorted(locks_dir.glob("*.lock")):
+        if lock_file.name.startswith("."):
+            continue
+        tid = lock_file.stem
+        if not tid or tid in excluded_ids:
+            continue
+        if _is_writer_lock_held(lock_file):
+            held_ids.append(tid)
+
+    if not held_ids or target_cwd is None:
+        return held_ids
+
+    target_resolved = target_cwd.resolve()
+    target_git_ctx = inspect_git_context(target_resolved)
+    target_git_root = target_git_ctx.git_root if target_git_ctx.is_git_repo else None
+    matched_ids: list[str] = []
+    for tid in held_ids:
+        locked_cwd = _lookup_thread_cwd_from_codex_home(codex_home, tid, rpc=rpc, deadline=deadline)
+        if locked_cwd and _cwd_matches_target(locked_cwd, target_resolved, target_git_root):
+            matched_ids.append(tid)
+    return matched_ids
+
+
+def _list_daemon_loaded_threads(
+    rpc: AppServerRpcClient, deadline: float
+) -> tuple[set[str], list[LoadedTuiThread]]:
+    loaded_ids: list[str] = []
+    seen_ids: set[str] = set()
+    cursor: str | None = None
+    while True:
+        res = rpc.request(
+            "thread/loaded/list",
+            {"cursor": cursor, "limit": 100},
+            deadline=deadline,
+        )
+        batch = res.get("data")
+        if isinstance(batch, list):
+            for entry in batch:
+                tid = entry.get("id") if isinstance(entry, dict) else entry
+                if isinstance(tid, str) and tid and tid not in seen_ids:
+                    seen_ids.add(tid)
+                    loaded_ids.append(tid)
+        next_cursor = res.get("nextCursor")
+        if not isinstance(next_cursor, str) or not next_cursor:
+            break
+        cursor = next_cursor
+
+    threads: list[LoadedTuiThread] = []
+    for tid in loaded_ids:
+        try:
+            read_res = rpc.request(
+                "thread/read",
+                {"threadId": tid, "includeTurns": False},
+                deadline=deadline,
+            )
+        except JsonRpcError:
+            continue
+        th_obj = read_res.get("thread") if isinstance(read_res.get("thread"), dict) else read_res
+        if not isinstance(th_obj, dict) or _is_subagent_or_ephemeral_thread(th_obj):
+            continue
+        parsed = _parse_loaded_tui_thread(th_obj)
+        if parsed is not None:
+            threads.append(parsed)
+    threads.sort(key=lambda t: (t.updated_at, t.created_at, t.thread_id), reverse=True)
+    return seen_ids, threads
+
+
+def _resolve_thread_with_client(
+    rpc: AppServerRpcClient,
+    endpoint: DaemonEndpoint,
+    codex_home: Path,
+    target_cwd: Path | None,
+    session_id: str | None,
+    select_latest: bool,
+    deadline: float,
+) -> ThreadResolution:
+    loaded_id_set, loaded_threads = _list_daemon_loaded_threads(rpc, deadline)
+    by_id = {t.thread_id: t for t in loaded_threads}
+
+    if session_id:
+        matched_thread = by_id.get(session_id)
+        if matched_thread is None and session_id in loaded_id_set:
+            with contextlib.suppress(JsonRpcError):
+                read_res = rpc.request(
+                    "thread/read",
+                    {"threadId": session_id, "includeTurns": False},
+                    deadline=deadline,
+                )
+                th_obj = (
+                    read_res.get("thread") if isinstance(read_res.get("thread"), dict) else read_res
+                )
+                if isinstance(th_obj, dict):
+                    matched_thread = _parse_loaded_tui_thread(th_obj)
+        if matched_thread is not None:
+            return ThreadResolution(
+                kind="matched",
+                thread=matched_thread,
+                candidates=(matched_thread,),
+                endpoint=endpoint.display(),
+            )
+        locked = _find_conflicting_writer_locks(
+            codex_home,
+            target_cwd=target_cwd,
+            session_id=session_id,
+            excluded_ids=loaded_id_set,
+            rpc=rpc,
+            deadline=deadline,
+        )
+        if locked:
+            return ThreadResolution(
+                kind="desktop_writer_lock",
+                locked_thread_ids=tuple(locked),
+                endpoint=endpoint.display(),
+                detail=(
+                    f"Session {session_id} is owned by Codex Desktop or VS Code "
+                    "(Layer B IPC, unsupported by CLI daemon attach)."
+                ),
+            )
+        return ThreadResolution(
+            kind="not_found",
+            endpoint=endpoint.display(),
+            detail=f"Session {session_id} is not loaded on the Codex Layer A daemon.",
+        )
+
+    assert target_cwd is not None
+    target_resolved = target_cwd.resolve()
+    target_git_ctx = inspect_git_context(target_resolved)
+    target_git_root = target_git_ctx.git_root if target_git_ctx.is_git_repo else None
+    matches = [
+        t
+        for t in loaded_threads
+        if _thread_matches_target_cwd(t, target_resolved, target_git_root)
+    ]
+    if len(matches) == 1:
+        return ThreadResolution(
+            kind="matched",
+            thread=matches[0],
+            candidates=(matches[0],),
+            endpoint=endpoint.display(),
+        )
+    if len(matches) > 1:
+        if select_latest:
+            return ThreadResolution(
+                kind="matched",
+                thread=matches[0],
+                candidates=tuple(matches),
+                endpoint=endpoint.display(),
+            )
+        return ThreadResolution(
+            kind="ambiguous",
+            candidates=tuple(matches),
+            endpoint=endpoint.display(),
+            detail=(
+                f"Found {len(matches)} loaded TUI sessions matching {target_resolved}. "
+                "Pass --session <thread_id> or --latest."
+            ),
+        )
+
+    locked = _find_conflicting_writer_locks(
+        codex_home,
+        target_cwd=target_resolved,
+        session_id=None,
+        excluded_ids=loaded_id_set,
+        rpc=rpc,
+        deadline=deadline,
+    )
+    if locked:
+        return ThreadResolution(
+            kind="desktop_writer_lock",
+            locked_thread_ids=tuple(locked),
+            endpoint=endpoint.display(),
+            detail=(
+                f"Active session(s) {', '.join(locked)} for {target_resolved} are owned by Codex Desktop "
+                "or VS Code (Layer B IPC, unsupported by CLI daemon attach)."
+            ),
+        )
+    return ThreadResolution(
+        kind="not_found",
+        endpoint=endpoint.display(),
+        detail=f"No loaded terminal `codex` TUI session matched {target_resolved} on the Layer A daemon.",
+    )
+
+
+def _extract_status_block_kind(status_obj: Any) -> Literal["approval_required", "user_input_required"] | None:
+    if not isinstance(status_obj, dict) or status_obj.get("type") != "active":
+        return None
+    flags = status_obj.get("activeFlags")
+    if not isinstance(flags, list):
+        return None
+    if "waitingOnUserInput" in flags:
+        return "user_input_required"
+    if "waitingOnApproval" in flags:
+        return "approval_required"
+    return None
+
+
+def _classify_server_interactive_request(
+    msg: dict[str, Any], thread_id: str
+) -> tuple[Literal["approval_required", "user_input_required"], dict[str, Any], str] | None:
+    if "id" not in msg or not isinstance(msg.get("method"), str):
+        return None
+    method = msg["method"]
+    if method not in APPROVAL_REQUEST_METHODS and method not in USER_INPUT_REQUEST_METHODS:
+        return None
+    params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+    msg_tid = params.get("threadId") or params.get("conversationId")
+    if isinstance(msg_tid, str) and msg_tid != thread_id:
+        return None
+    kind: Literal["approval_required", "user_input_required"] = (
+        "user_input_required" if method in USER_INPUT_REQUEST_METHODS else "approval_required"
+    )
+    req_info = {"id": msg.get("id"), "method": method, "params": params}
+    return kind, req_info, _format_interactive_block_message(method, params)
+
+
+def _drain_companion_approval_request(
+    rpc: AppServerRpcClient,
+    thread_id: str,
+    fallback_kind: Literal["approval_required", "user_input_required"],
+    deadline: float,
+) -> tuple[Literal["approval_required", "user_input_required"], dict[str, Any] | None, str]:
+    grace_deadline = min(deadline, time.monotonic() + APPROVAL_DETAIL_GRACE_SECONDS)
+    while rpc.wait_readable(max(0.0, grace_deadline - time.monotonic())):
+        try:
+            msg = rpc.next_message(grace_deadline)
+        except (TimeoutError, WebSocketClosedError):
+            break
+        classified = _classify_server_interactive_request(msg, thread_id)
+        if classified is not None:
+            return classified
+    fallback_msg = (
+        f"{fallback_kind}: Live TUI session is paused ({fallback_kind.replace('_', ' ')}) in terminal."
+    )
+    return fallback_kind, None, fallback_msg
+
+
+def _harvest_completed_turn_from_read(
+    rpc: AppServerRpcClient,
+    thread_id: str,
+    target_turn_id: str | None,
+    client_msg_id: str,
+    preview_limit: int,
+    deadline: float,
+) -> tuple[AttachOutcomeStatus | None, str | None, list[CommandRecord], list[str], list[str], str]:
+    commands: list[CommandRecord] = []
+    changed_files: list[str] = []
+    errors: list[str] = []
+    final_message = ""
+    outcome: AttachOutcomeStatus | None = None
+    harvested_turn_id: str | None = None
+    with contextlib.suppress(Exception):
+        read_res = rpc.request(
+            "thread/read",
+            {"threadId": thread_id, "includeTurns": True},
+            deadline=min(deadline, time.monotonic() + 5.0),
+        )
+        th_obj = read_res.get("thread") if isinstance(read_res.get("thread"), dict) else {}
+        turns = th_obj.get("turns") if isinstance(th_obj.get("turns"), list) else []
+        chosen_turn: dict[str, Any] | None = None
+        if target_turn_id:
+            for t in turns:
+                if isinstance(t, dict) and t.get("id") == target_turn_id:
+                    chosen_turn = t
+                    break
+        if chosen_turn is None and client_msg_id:
+            for t in reversed(turns):
+                if not isinstance(t, dict):
+                    continue
+                for item in t.get("items") or []:
+                    if isinstance(item, dict) and item.get("type") in {"userMessage", "user_message"}:
+                        if (item.get("clientId") or item.get("clientUserMessageId")) == client_msg_id:
+                            chosen_turn = t
+                            break
+                if chosen_turn is not None:
+                    break
+        if chosen_turn is None and turns and isinstance(turns[-1], dict):
+            chosen_turn = turns[-1]
+
+        if chosen_turn is not None:
+            raw_status = chosen_turn.get("status")
+            if raw_status in {"completed", "failed", "interrupted"}:
+                if isinstance(chosen_turn.get("id"), str) and chosen_turn["id"]:
+                    harvested_turn_id = chosen_turn["id"]
+                for item in chosen_turn.get("items") or []:
+                    if isinstance(item, dict):
+                        _ingest_app_server_item(item, commands, changed_files, errors, preview_limit)
+                        if item.get("type") in {"agentMessage", "agent_message"}:
+                            text = _extract_agent_text(item)
+                            if text:
+                                final_message = text
+                if raw_status == "failed":
+                    outcome = "failed"
+                    err_text = (
+                        _extract_error_text(chosen_turn.get("error"))
+                        or "turn_failed: Turn failed on Codex Layer A daemon."
+                    )
+                    _append_unique(errors, err_text)
+                elif raw_status == "interrupted":
+                    outcome = "interrupted"
+                    _append_unique(errors, "turn_interrupted: Turn was interrupted in live TUI.")
+                else:
+                    outcome = "completed"
+    return outcome, harvested_turn_id, commands, changed_files, errors, final_message
+
+
+def _dispatch_and_observe_turn(
+    rpc: AppServerRpcClient,
+    thread: LoadedTuiThread,
+    req: AttachRequest,
+    prompt: str,
+    schema_dict: dict[str, Any] | None,
+    preview_limit: int,
+    deadline: float,
+    client_msg_id: str | None = None,
+) -> DaemonTurnObservation:
+    thread_id = thread.thread_id
+    if client_msg_id is None:
+        client_msg_id = str(uuid.uuid4())
+    input_items: list[dict[str, Any]] = [
+        {"type": "text", "text": prompt, "text_elements": []},
+    ]
+    for img_path in req.images:
+        input_items.append({"type": "localImage", "path": str(img_path), "detail": None})
+
+    commands: list[CommandRecord] = []
+    changed_files: list[str] = []
+    errors: list[str] = []
+    final_message = ""
+    usage: dict[str, Any] | None = None
+    event_count = 0
+    target_turn_id: str | None = None
+    dispatch_method: Literal["thread/queue/add", "turn/start"] = "thread/queue/add"
+    queued_behind_active_turn = False
+    subscribed = False
+
+    try:
+        current_status: dict[str, Any] = {
+            "type": thread.status,
+            "activeFlags": list(thread.active_flags),
+        }
+        try:
+            resume_res = rpc.request(
+                "thread/resume",
+                {"threadId": thread_id, "excludeTurns": True},
+                deadline=min(deadline, time.monotonic() + DEFAULT_DISCOVERY_TIMEOUT),
+            )
+            subscribed = True
+            th_after_resume = resume_res.get("thread")
+            if isinstance(th_after_resume, dict) and isinstance(th_after_resume.get("status"), dict):
+                current_status = th_after_resume["status"]
+        except JsonRpcError as exc:
+            if "no rollout found" not in exc.rpc_message.lower():
+                raise DriverRuntimeError(str(exc)) from exc
+
+        if subscribed:
+            while rpc.has_pending():
+                queued_msg = rpc.next_message(deadline)
+                event_count += 1
+                classified = _classify_server_interactive_request(queued_msg, thread_id)
+                if classified is not None and not req.wait_for_approval:
+                    b_kind, req_info, b_msg = classified
+                    _append_unique(errors, b_msg)
+                    return DaemonTurnObservation(
+                        thread_id=thread_id,
+                        turn_id=None,
+                        client_user_message_id=client_msg_id,
+                        dispatch_method=dispatch_method,
+                        queued_behind_active_turn=False,
+                        status=b_kind,
+                        commands=commands,
+                        changed_files=changed_files,
+                        errors=errors,
+                        final_message=final_message,
+                        usage=usage,
+                        approval_request=req_info,
+                        event_count=event_count,
+                    )
+                q_method = queued_msg.get("method")
+                if not isinstance(q_method, str):
+                    continue
+                q_params = queued_msg.get("params") if isinstance(queued_msg.get("params"), dict) else {}
+                q_tid = q_params.get("threadId") or (
+                    q_params.get("thread", {}).get("id")
+                    if isinstance(q_params.get("thread"), dict)
+                    else None
+                )
+                if isinstance(q_tid, str) and q_tid != thread_id:
+                    continue
+                if q_method == "thread/closed":
+                    _append_unique(errors, "thread_closed: Live TUI session closed before turn start.")
+                    return DaemonTurnObservation(
+                        thread_id=thread_id,
+                        turn_id=None,
+                        client_user_message_id=client_msg_id,
+                        dispatch_method=dispatch_method,
+                        queued_behind_active_turn=False,
+                        status="thread_closed",
+                        commands=commands,
+                        changed_files=changed_files,
+                        errors=errors,
+                        final_message=final_message,
+                        usage=usage,
+                        event_count=event_count,
+                    )
+                if q_method == "thread/status/changed" and isinstance(q_params.get("status"), dict):
+                    current_status = q_params["status"]
+                elif q_method == "turn/completed":
+                    current_status = {"type": "idle", "activeFlags": []}
+
+            if not req.wait_for_approval:
+                initial_block = _extract_status_block_kind(current_status)
+                if initial_block is not None:
+                    b_kind, req_info, b_msg = _drain_companion_approval_request(
+                        rpc, thread_id, initial_block, deadline
+                    )
+                    _append_unique(errors, b_msg)
+                    return DaemonTurnObservation(
+                        thread_id=thread_id,
+                        turn_id=None,
+                        client_user_message_id=client_msg_id,
+                        dispatch_method=dispatch_method,
+                        queued_behind_active_turn=False,
+                        status=b_kind,
+                        commands=commands,
+                        changed_files=changed_files,
+                        errors=errors,
+                        final_message=final_message,
+                        usage=usage,
+                        approval_request=req_info,
+                        event_count=event_count,
+                    )
+
+        is_active = current_status.get("type") == "active"
+        has_turn_overrides = (
+            req.model is not None or req.effort is not None or schema_dict is not None
+        )
+
+        if is_active and (req.model is not None or req.effort is not None):
+            while is_active:
+                msg = rpc.next_message(deadline)
+                event_count += 1
+                classified = _classify_server_interactive_request(msg, thread_id)
+                if classified is not None and not req.wait_for_approval:
+                    b_kind, req_info, b_msg = classified
+                    _append_unique(errors, b_msg)
+                    return DaemonTurnObservation(
+                        thread_id=thread_id,
+                        turn_id=None,
+                        client_user_message_id=client_msg_id,
+                        dispatch_method="turn/start",
+                        queued_behind_active_turn=True,
+                        status=b_kind,
+                        commands=commands,
+                        changed_files=changed_files,
+                        errors=errors,
+                        final_message=final_message,
+                        usage=usage,
+                        approval_request=req_info,
+                        event_count=event_count,
+                    )
+                method = msg.get("method")
+                params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+                if params.get("threadId") != thread_id:
+                    continue
+                if method == "turn/completed":
+                    is_active = False
+                elif method == "thread/status/changed":
+                    st = params.get("status")
+                    block_kind = _extract_status_block_kind(st)
+                    if block_kind is not None and not req.wait_for_approval:
+                        b_kind, req_info, b_msg = _drain_companion_approval_request(
+                            rpc, thread_id, block_kind, deadline
+                        )
+                        _append_unique(errors, b_msg)
+                        return DaemonTurnObservation(
+                            thread_id=thread_id,
+                            turn_id=None,
+                            client_user_message_id=client_msg_id,
+                            dispatch_method="turn/start",
+                            queued_behind_active_turn=True,
+                            status=b_kind,
+                            commands=commands,
+                            changed_files=changed_files,
+                            errors=errors,
+                            final_message=final_message,
+                            usage=usage,
+                            approval_request=req_info,
+                            event_count=event_count,
+                        )
+                    if isinstance(st, dict) and st.get("type") == "idle":
+                        is_active = False
+                elif method == "thread/closed":
+                    _append_unique(errors, "thread_closed: Live TUI session closed before turn start.")
+                    return DaemonTurnObservation(
+                        thread_id=thread_id,
+                        turn_id=None,
+                        client_user_message_id=client_msg_id,
+                        dispatch_method="turn/start",
+                        queued_behind_active_turn=True,
+                        status="thread_closed",
+                        commands=commands,
+                        changed_files=changed_files,
+                        errors=errors,
+                        final_message=final_message,
+                        usage=usage,
+                        event_count=event_count,
+                    )
+
+        if not is_active and has_turn_overrides:
+            dispatch_method = "turn/start"
+            queued_behind_active_turn = False
+            turn_params: dict[str, Any] = {
+                "threadId": thread_id,
+                "clientUserMessageId": client_msg_id,
+                "input": input_items,
+            }
+            if req.model is not None:
+                turn_params["model"] = req.model
+            if req.effort is not None:
+                turn_params["effort"] = req.effort
+            if schema_dict is not None:
+                turn_params["outputSchema"] = schema_dict
+            start_res = rpc.request("turn/start", turn_params, deadline=deadline)
+            turn_obj = start_res.get("turn") if isinstance(start_res.get("turn"), dict) else {}
+            if isinstance(turn_obj.get("id"), str) and turn_obj["id"]:
+                target_turn_id = turn_obj["id"]
+        else:
+            dispatch_method = "thread/queue/add"
+            queued_behind_active_turn = is_active
+            rpc.request(
+                "thread/queue/add",
+                {
+                    "threadId": thread_id,
+                    "clientUserMessageId": client_msg_id,
+                    "input": input_items,
+                },
+                deadline=deadline,
+            )
+
+        if not subscribed:
+            post_status_type = "active"
+            for _ in range(4):
+                try:
+                    resume_res = rpc.request(
+                        "thread/resume",
+                        {"threadId": thread_id, "excludeTurns": True},
+                        deadline=min(deadline, time.monotonic() + 5.0),
+                    )
+                    subscribed = True
+                    th_after = resume_res.get("thread")
+                    if isinstance(th_after, dict) and isinstance(th_after.get("status"), dict):
+                        post_status_type = str(th_after["status"].get("type") or "active")
+                    break
+                except JsonRpcError as exc:
+                    if "no rollout found" not in exc.rpc_message.lower():
+                        raise DriverRuntimeError(str(exc)) from exc
+                    rpc.wait_readable(0.05)
+            if (
+                subscribed
+                and post_status_type == "idle"
+                and not rpc.has_pending_turn_completed(thread_id)
+            ):
+                h_outcome, h_tid, h_cmds, h_files, h_errs, h_msg = _harvest_completed_turn_from_read(
+                    rpc, thread_id, target_turn_id, client_msg_id, preview_limit, deadline
+                )
+                if h_outcome is not None:
+                    return DaemonTurnObservation(
+                        thread_id=thread_id,
+                        turn_id=h_tid or target_turn_id,
+                        client_user_message_id=client_msg_id,
+                        dispatch_method=dispatch_method,
+                        queued_behind_active_turn=queued_behind_active_turn,
+                        status=h_outcome,
+                        commands=h_cmds,
+                        changed_files=h_files,
+                        errors=h_errs,
+                        final_message=h_msg,
+                        usage=usage,
+                        event_count=event_count,
+                    )
+
+        prior_turn_completed = not queued_behind_active_turn
+        candidate_turn_id: str | None = None
+
+        while True:
+            try:
+                msg = rpc.next_message(deadline)
+            except TimeoutError:
+                _append_unique(
+                    errors,
+                    f"timeout: Timed out after {req.timeout:g}s waiting for live TUI turn completion.",
+                )
+                return DaemonTurnObservation(
+                    thread_id=thread_id,
+                    turn_id=target_turn_id,
+                    client_user_message_id=client_msg_id,
+                    dispatch_method=dispatch_method,
+                    queued_behind_active_turn=queued_behind_active_turn,
+                    status="timeout",
+                    commands=commands,
+                    changed_files=changed_files,
+                    errors=errors,
+                    final_message=final_message,
+                    usage=usage,
+                    event_count=event_count,
+                )
+            except WebSocketClosedError as exc:
+                _append_unique(errors, f"connection_closed: {exc}")
+                return DaemonTurnObservation(
+                    thread_id=thread_id,
+                    turn_id=target_turn_id,
+                    client_user_message_id=client_msg_id,
+                    dispatch_method=dispatch_method,
+                    queued_behind_active_turn=queued_behind_active_turn,
+                    status="thread_closed",
+                    commands=commands,
+                    changed_files=changed_files,
+                    errors=errors,
+                    final_message=final_message,
+                    usage=usage,
+                    event_count=event_count,
+                )
+
+            event_count += 1
+            classified = _classify_server_interactive_request(msg, thread_id)
+            if classified is not None:
+                if not req.wait_for_approval:
+                    b_kind, req_info, b_msg = classified
+                    _append_unique(errors, b_msg)
+                    return DaemonTurnObservation(
+                        thread_id=thread_id,
+                        turn_id=target_turn_id,
+                        client_user_message_id=client_msg_id,
+                        dispatch_method=dispatch_method,
+                        queued_behind_active_turn=queued_behind_active_turn,
+                        status=b_kind,
+                        commands=commands,
+                        changed_files=changed_files,
+                        errors=errors,
+                        final_message=final_message,
+                        usage=usage,
+                        approval_request=req_info,
+                        event_count=event_count,
+                    )
+                continue
+
+            method = msg.get("method")
+            if not isinstance(method, str):
+                continue
+            params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+            msg_tid = params.get("threadId") or (
+                params.get("thread", {}).get("id") if isinstance(params.get("thread"), dict) else None
+            )
+            if isinstance(msg_tid, str) and msg_tid != thread_id:
+                continue
+
+            if method == "thread/closed":
+                _append_unique(errors, "thread_closed: Live TUI session closed before turn finished.")
+                return DaemonTurnObservation(
+                    thread_id=thread_id,
+                    turn_id=target_turn_id,
+                    client_user_message_id=client_msg_id,
+                    dispatch_method=dispatch_method,
+                    queued_behind_active_turn=queued_behind_active_turn,
+                    status="thread_closed",
+                    commands=commands,
+                    changed_files=changed_files,
+                    errors=errors,
+                    final_message=final_message,
+                    usage=usage,
+                    event_count=event_count,
+                )
+
+            if method == "thread/status/changed":
+                block_kind = _extract_status_block_kind(params.get("status"))
+                if block_kind is not None and not req.wait_for_approval:
+                    b_kind, req_info, b_msg = _drain_companion_approval_request(
+                        rpc, thread_id, block_kind, deadline
+                    )
+                    _append_unique(errors, b_msg)
+                    return DaemonTurnObservation(
+                        thread_id=thread_id,
+                        turn_id=target_turn_id,
+                        client_user_message_id=client_msg_id,
+                        dispatch_method=dispatch_method,
+                        queued_behind_active_turn=queued_behind_active_turn,
+                        status=b_kind,
+                        commands=commands,
+                        changed_files=changed_files,
+                        errors=errors,
+                        final_message=final_message,
+                        usage=usage,
+                        approval_request=req_info,
+                        event_count=event_count,
+                    )
+                continue
+
+            if method == "turn/started":
+                turn_obj = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+                started_id = turn_obj.get("id")
+                if isinstance(started_id, str) and started_id:
+                    if target_turn_id is None and (
+                        not queued_behind_active_turn or prior_turn_completed
+                    ):
+                        candidate_turn_id = started_id
+                continue
+
+            if method in {"item/started", "item/completed"}:
+                item = params.get("item")
+                item_turn_id = params.get("turnId")
+                if isinstance(item, dict) and item.get("type") in {"userMessage", "user_message"}:
+                    item_client_id = item.get("clientId") or item.get("clientUserMessageId")
+                    if item_client_id == client_msg_id and isinstance(item_turn_id, str) and item_turn_id:
+                        target_turn_id = item_turn_id
+                        candidate_turn_id = None
+                    elif (
+                        item_client_id is None
+                        and target_turn_id is None
+                        and prior_turn_completed
+                        and isinstance(item_turn_id, str)
+                        and item_turn_id
+                    ):
+                        target_turn_id = item_turn_id
+                        candidate_turn_id = None
+                    elif isinstance(item_client_id, str) and item_client_id != client_msg_id:
+                        if target_turn_id == item_turn_id:
+                            target_turn_id = None
+                        if candidate_turn_id == item_turn_id:
+                            candidate_turn_id = None
+                        queued_behind_active_turn = True
+                        prior_turn_completed = False
+                    continue
+
+                effective_turn_id = target_turn_id or candidate_turn_id
+                if method == "item/completed" and isinstance(item, dict):
+                    is_our_turn = (
+                        (effective_turn_id is not None and item_turn_id == effective_turn_id)
+                        or (not queued_behind_active_turn and effective_turn_id is None)
+                    )
+                    if is_our_turn:
+                        _ingest_app_server_item(item, commands, changed_files, errors, preview_limit)
+                        if item.get("type") in {"agentMessage", "agent_message"}:
+                            text = _extract_agent_text(item)
+                            if text:
+                                final_message = text
+                continue
+
+            if method == "thread/tokenUsage/updated":
+                effective_turn_id = target_turn_id or candidate_turn_id
+                if (
+                    (effective_turn_id is not None and params.get("turnId") == effective_turn_id)
+                    or (not queued_behind_active_turn and effective_turn_id is None)
+                ):
+                    tu = params.get("tokenUsage")
+                    if isinstance(tu, dict):
+                        last_u = tu.get("last")
+                        usage = last_u if isinstance(last_u, dict) else tu
+                continue
+
+            if method == "error":
+                effective_turn_id = target_turn_id or candidate_turn_id
+                if not params.get("willRetry", False) and (
+                    (effective_turn_id is not None and params.get("turnId") == effective_turn_id)
+                    or (not queued_behind_active_turn and effective_turn_id is None)
+                ):
+                    err_text = _extract_error_text(params.get("error")) or _extract_error_text(params)
+                    if err_text:
+                        _append_unique(errors, err_text)
+                continue
+
+            if method == "turn/completed":
+                turn_obj = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+                completed_id = turn_obj.get("id") or params.get("turnId")
+                effective_turn_id = target_turn_id or candidate_turn_id
+                if queued_behind_active_turn and effective_turn_id is None:
+                    prior_turn_completed = True
+                    continue
+                if effective_turn_id is not None and completed_id != effective_turn_id:
+                    continue
+                turn_status = str(turn_obj.get("status") or "completed")
+                outcome: AttachOutcomeStatus
+                if turn_status == "failed":
+                    outcome = "failed"
+                    err_text = (
+                        _extract_error_text(turn_obj.get("error"))
+                        or "turn_failed: Turn failed on Codex Layer A daemon."
+                    )
+                    _append_unique(errors, err_text)
+                elif turn_status == "interrupted":
+                    outcome = "interrupted"
+                    _append_unique(errors, "turn_interrupted: Turn was interrupted in live TUI.")
+                else:
+                    outcome = "completed"
+                return DaemonTurnObservation(
+                    thread_id=thread_id,
+                    turn_id=completed_id if isinstance(completed_id, str) else effective_turn_id,
+                    client_user_message_id=client_msg_id,
+                    dispatch_method=dispatch_method,
+                    queued_behind_active_turn=queued_behind_active_turn,
+                    status=outcome,
+                    commands=commands,
+                    changed_files=changed_files,
+                    errors=errors,
+                    final_message=final_message,
+                    usage=usage,
+                    event_count=event_count,
+                )
+    finally:
+        rpc.unsubscribe_quietly(thread_id)
 
 
 def _execute_worker(
@@ -1657,6 +3514,364 @@ def _handle_review(args: argparse.Namespace) -> int:
     return EXIT_OK if summary.exit_code == 0 else EXIT_ERROR
 
 
+def _handle_sessions(args: argparse.Namespace) -> int:
+    if args.worker != "codex":
+        raise ValidationError("Live TUI session discovery is only supported for --worker codex.")
+    if args.timeout <= 0:
+        raise ValidationError("--timeout must be greater than 0.")
+    target_cwd: Path | None = None
+    if args.cwd is not None:
+        target_cwd = Path(args.cwd)
+        if not target_cwd.is_dir():
+            raise ValidationError(f"Working directory does not exist: {target_cwd}")
+        target_cwd = target_cwd.resolve()
+
+    codex_home = _resolve_codex_home()
+    endpoint = resolve_daemon_endpoint(
+        remote=args.remote,
+        remote_auth_token_env=args.remote_auth_token_env,
+        codex_home=codex_home,
+    )
+    deadline = time.monotonic() + args.timeout
+    try:
+        rpc = AppServerRpcClient(endpoint, connect_timeout=min(args.timeout, 5.0))
+    except DaemonOfflineError as exc:
+        locked = _find_conflicting_writer_locks(
+            codex_home,
+            target_cwd=target_cwd,
+            session_id=getattr(args, "session", None),
+            excluded_ids=set(),
+        )
+        _emit_json(
+            {
+                "ok": False,
+                "daemon_online": False,
+                "error": "daemon_offline",
+                "message": str(exc),
+                "endpoint": exc.endpoint,
+                "cwd": str(target_cwd) if target_cwd else None,
+                "sessions": [],
+                "desktop_locked_thread_ids": locked,
+            }
+        )
+        return EXIT_ERROR
+
+    try:
+        rpc.initialize(deadline=deadline)
+        loaded_id_set, threads = _list_daemon_loaded_threads(rpc, deadline=deadline)
+        if target_cwd is not None:
+            target_git_ctx = inspect_git_context(target_cwd)
+            target_git_root = target_git_ctx.git_root if target_git_ctx.is_git_repo else None
+            threads = [
+                t for t in threads if _thread_matches_target_cwd(t, target_cwd, target_git_root)
+            ]
+        locked = _find_conflicting_writer_locks(
+            codex_home,
+            target_cwd=target_cwd,
+            session_id=getattr(args, "session", None),
+            excluded_ids=loaded_id_set,
+            rpc=rpc,
+            deadline=deadline,
+        )
+    finally:
+        rpc.close()
+
+    _emit_json(
+        {
+            "ok": True,
+            "daemon_online": True,
+            "endpoint": endpoint.display(),
+            "cwd": str(target_cwd) if target_cwd else None,
+            "sessions": [t.to_candidate_dict() for t in threads],
+            "desktop_locked_thread_ids": locked,
+        }
+    )
+    return EXIT_OK
+
+
+def _emit_resolution_failure(
+    resolution: ThreadResolution,
+    target_cwd: Path | None,
+    session_id: str | None,
+) -> int:
+    if resolution.kind == "ambiguous":
+        _emit_json(
+            {
+                "ok": False,
+                "error": "ambiguous_tui_threads",
+                "message": resolution.detail,
+                "cwd": str(target_cwd) if target_cwd else None,
+                "endpoint": resolution.endpoint,
+                "candidates": [c.to_candidate_dict() for c in resolution.candidates],
+            }
+        )
+        return EXIT_INVALID_ARGS
+    if resolution.kind == "desktop_writer_lock":
+        _emit_json(
+            {
+                "ok": False,
+                "error": "desktop_writer_lock",
+                "message": resolution.detail,
+                "cwd": str(target_cwd) if target_cwd else None,
+                "session_id": session_id,
+                "endpoint": resolution.endpoint,
+                "locked_thread_ids": list(resolution.locked_thread_ids),
+            }
+        )
+        return EXIT_LOCK_CONFLICT
+    if resolution.kind == "daemon_offline":
+        _emit_json(
+            {
+                "ok": False,
+                "error": "daemon_offline",
+                "message": resolution.detail,
+                "endpoint": resolution.endpoint,
+            }
+        )
+        return EXIT_ERROR
+    _emit_json(
+        {
+            "ok": False,
+            "error": "session_not_found",
+            "message": resolution.detail,
+            "cwd": str(target_cwd) if target_cwd else None,
+            "session_id": session_id,
+            "endpoint": resolution.endpoint,
+        }
+    )
+    return EXIT_ERROR
+
+
+def _handle_attach(args: argparse.Namespace) -> int:
+    if args.list:
+        return _handle_sessions(args)
+    if args.worker != "codex":
+        raise ValidationError(
+            "Live TUI attach is only supported for --worker codex (Layer A app-server daemon)."
+        )
+    if args.timeout <= 0:
+        raise ValidationError("--timeout must be greater than 0.")
+    if args.cwd is None and not args.session:
+        raise ValidationError("Provide --cwd <dir> or --session <thread_id>.")
+    if args.session is not None and not args.session.strip():
+        raise ValidationError("--session must not be empty.")
+
+    target_cwd: Path | None = None
+    if args.cwd is not None:
+        raw_cwd = Path(args.cwd)
+        if not raw_cwd.is_dir():
+            raise ValidationError(f"Working directory does not exist: {raw_cwd}")
+        target_cwd = raw_cwd.resolve()
+
+    effort = _validate_codex_effort(args.effort) if args.effort is not None else None
+    schema_path = Path(args.schema) if args.schema else None
+    schema_dict: dict[str, Any] | None = None
+    if schema_path is not None:
+        if not schema_path.is_file():
+            raise ValidationError(f"Schema file does not exist: {schema_path}")
+        try:
+            loaded_schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValidationError(f"Invalid JSON in schema file {schema_path}: {exc}") from exc
+        if not isinstance(loaded_schema, dict):
+            raise ValidationError(f"Schema file must contain a JSON object: {schema_path}")
+        schema_dict = loaded_schema
+
+    out_msg = Path(args.output_last_message).resolve() if args.output_last_message else None
+    images = _resolve_image_paths(args.image)
+    prompt = _read_prompt(args.prompt_file, args.prompt, required=True)
+    assert prompt is not None
+
+    req = AttachRequest(
+        worker="codex",
+        mode=args.mode,
+        cwd=target_cwd,
+        session_id=args.session.strip() if args.session else None,
+        select_latest=args.latest,
+        effort=effort,
+        model=args.model,
+        schema_path=schema_path.resolve() if schema_path else None,
+        output_last_message=out_msg,
+        images=images,
+        timeout=args.timeout,
+        wait_for_approval=args.wait_for_approval,
+        remote=args.remote,
+        remote_auth_token_env=args.remote_auth_token_env,
+    )
+
+    codex_home = _resolve_codex_home()
+    endpoint = resolve_daemon_endpoint(
+        remote=req.remote,
+        remote_auth_token_env=req.remote_auth_token_env,
+        codex_home=codex_home,
+    )
+    deadline = time.monotonic() + req.timeout
+
+    try:
+        rpc = AppServerRpcClient(endpoint, connect_timeout=min(req.timeout, DEFAULT_DISCOVERY_TIMEOUT))
+    except DaemonOfflineError as exc:
+        locked = _find_conflicting_writer_locks(
+            codex_home,
+            target_cwd=req.cwd,
+            session_id=req.session_id,
+            excluded_ids=set(),
+        )
+        offline_resolution = (
+            ThreadResolution(
+                kind="desktop_writer_lock",
+                locked_thread_ids=tuple(locked),
+                endpoint=exc.endpoint,
+                detail=(
+                    f"Active session(s) {', '.join(locked)} are owned by Codex Desktop or VS Code "
+                    "(Layer B IPC, unsupported by CLI daemon attach)."
+                ),
+            )
+            if locked
+            else ThreadResolution(
+                kind="daemon_offline",
+                endpoint=exc.endpoint,
+                detail=str(exc),
+            )
+        )
+        return _emit_resolution_failure(offline_resolution, req.cwd, req.session_id)
+
+    try:
+        rpc.initialize(deadline=min(deadline, time.monotonic() + DEFAULT_DISCOVERY_TIMEOUT))
+        resolution = _resolve_thread_with_client(
+            rpc=rpc,
+            endpoint=endpoint,
+            codex_home=codex_home,
+            target_cwd=req.cwd,
+            session_id=req.session_id,
+            select_latest=req.select_latest,
+            deadline=min(deadline, time.monotonic() + DEFAULT_DISCOVERY_TIMEOUT),
+        )
+        if resolution.kind != "matched" or resolution.thread is None:
+            return _emit_resolution_failure(resolution, req.cwd, req.session_id)
+
+        matched_thread = resolution.thread
+        effective_cwd = req.cwd if req.cwd is not None else Path(matched_thread.resolved_cwd)
+        _maybe_exclude_local_prompt_dir(effective_cwd, args.prompt_file)
+        log_path = _prepare_log_path(
+            Path(args.log_dir) if args.log_dir else None,
+            "codex",
+            req.mode,
+        )
+        preview_limit = FULL_OUTPUT_PREVIEW_LIMIT if args.full_output else OUTPUT_PREVIEW_LIMIT
+
+        lock_cm = (
+            acquire_ship_lock(effective_cwd, "attach-ship")
+            if req.mode == "ship" and effective_cwd.exists()
+            else contextlib.nullcontext()
+        )
+        with lock_cm, log_path.open("w", encoding="utf-8") as log_f:
+            client_msg_id = str(uuid.uuid4())
+            log_f.write(
+                json.dumps(
+                    {
+                        "type": "attach.session",
+                        "thread_id": matched_thread.thread_id,
+                        "client_user_message_id": client_msg_id,
+                        "cwd": str(effective_cwd),
+                        "endpoint": endpoint.display(),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+            log_f.flush()
+
+            def _write_log_frame(frame_msg: dict[str, Any]) -> None:
+                log_f.write(json.dumps(frame_msg, ensure_ascii=False) + "\n")
+                log_f.flush()
+
+            rpc.set_log_sink(_write_log_frame)
+            observation = _dispatch_and_observe_turn(
+                rpc=rpc,
+                thread=matched_thread,
+                req=req,
+                prompt=prompt,
+                schema_dict=schema_dict,
+                preview_limit=preview_limit,
+                deadline=deadline,
+                client_msg_id=client_msg_id,
+            )
+            rpc.set_log_sink(None)
+            log_f.write(
+                json.dumps(
+                    {
+                        "type": "attach.turn",
+                        "thread_id": matched_thread.thread_id,
+                        "turn_id": observation.turn_id,
+                        "client_user_message_id": observation.client_user_message_id,
+                        "queued_behind_active_turn": observation.queued_behind_active_turn,
+                        "status": observation.status,
+                        "errors": observation.errors,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+            log_f.flush()
+    finally:
+        rpc.close()
+
+    if req.output_last_message is not None and observation.final_message:
+        req.output_last_message.parent.mkdir(parents=True, exist_ok=True)
+        req.output_last_message.write_text(observation.final_message, encoding="utf-8")
+
+    errors = list(observation.errors)
+    receipt, receipt_valid = parse_receipt(observation.final_message)
+    if req.schema_path is not None and observation.status == "completed" and receipt_valid is not True:
+        _append_unique(
+            errors,
+            "receipt_validation_failed: Final agent message did not satisfy the required receipt schema.",
+        )
+    if req.mode == "scout" and observation.changed_files:
+        _append_unique(
+            errors,
+            "scout_contract_violation: File changes were emitted during a read-only scout attach.",
+        )
+
+    summary_final_message: str | None = (
+        None if (receipt_valid is True and not args.full_output) else observation.final_message
+    )
+    commands = (
+        observation.commands
+        if args.full_output
+        else [_compact_command_record(record) for record in observation.commands]
+    )
+    git_diff_files = collect_git_diff_files(
+        effective_cwd if effective_cwd.exists() else None,
+        base=args.base,
+    )
+    ok_turn = (
+        observation.status == "completed"
+        and (req.schema_path is None or receipt_valid is True)
+        and not (req.mode == "scout" and observation.changed_files)
+    )
+    exit_code = EXIT_OK if ok_turn else EXIT_ERROR
+    summary = AuditSummary(
+        worker="codex",
+        mode=req.mode,
+        session_id=matched_thread.thread_id,
+        exit_code=exit_code,
+        commands=commands,
+        changed_files=observation.changed_files,
+        git_diff_files=git_diff_files,
+        errors=errors,
+        final_message=summary_final_message,
+        receipt=receipt,
+        receipt_valid=receipt_valid,
+        usage=observation.usage,
+        raw_log=str(log_path),
+        command=["codex-app-server", endpoint.display(), observation.dispatch_method, matched_thread.thread_id],
+        status=observation.status,
+    )
+    _emit_json(_serialize_audit_summary(summary, full_output=args.full_output))
+    return exit_code
+
+
 def _handle_audit(args: argparse.Namespace) -> int:
     adapter = get_adapter(args.worker)
     log_path = Path(args.log)
@@ -1790,6 +4005,43 @@ def build_parser() -> argparse.ArgumentParser:
     p_aud.add_argument("--exit-code", type=int, default=0)
     p_aud.add_argument("--full-output", action="store_true")
     p_aud.set_defaults(handler=_handle_audit)
+
+    p_ses = subparsers.add_parser(
+        "sessions",
+        help="List loaded terminal Codex TUI sessions on the Layer A app-server daemon.",
+    )
+    p_ses.add_argument("--worker", default="codex", choices=sorted(ADAPTERS))
+    p_ses.add_argument("--cwd")
+    p_ses.add_argument("--remote")
+    p_ses.add_argument("--remote-auth-token-env")
+    p_ses.add_argument("--timeout", type=float, default=DEFAULT_DISCOVERY_TIMEOUT)
+    p_ses.set_defaults(handler=_handle_sessions)
+
+    p_att = subparsers.add_parser(
+        "attach",
+        help="Attach to a live terminal Codex TUI session via the Layer A daemon without stealing locks.",
+    )
+    p_att.add_argument("--worker", default="codex", choices=sorted(ADAPTERS))
+    p_att.add_argument("--cwd")
+    p_att.add_argument("--session")
+    p_att.add_argument("--latest", action="store_true")
+    p_att.add_argument("--list", action="store_true")
+    p_att.add_argument("--mode", default="ship", choices=["scout", "ship"])
+    p_att.add_argument("--prompt-file")
+    p_att.add_argument("--prompt")
+    p_att.add_argument("--effort")
+    p_att.add_argument("--model")
+    p_att.add_argument("--schema")
+    p_att.add_argument("--output-last-message")
+    p_att.add_argument("--image", action="append")
+    p_att.add_argument("--log-dir")
+    p_att.add_argument("--base")
+    p_att.add_argument("--timeout", type=float, default=DEFAULT_ATTACH_TIMEOUT)
+    p_att.add_argument("--wait-for-approval", action="store_true")
+    p_att.add_argument("--remote")
+    p_att.add_argument("--remote-auth-token-env")
+    p_att.add_argument("--full-output", action="store_true")
+    p_att.set_defaults(handler=_handle_attach)
 
     return parser
 
