@@ -54,6 +54,7 @@
 - **按需指定任意 GPT 型号与推理档位。** 每次 `run`、`resume` 或 `review` 均可显式传入 `--model <model-id>`（如 `gpt-6.2-astra`、`gpt-6.2-sol`）与 `--effort medium|high|xhigh`，`drive.py` 在拉起进程前自动拦截非法 `ultra` 档位。
 - **用真实退出码说话，绝不轻信自述。** `drive.py` 采集 `--json` 事件流并输出紧凑 `AuditSummary`（120 字符单行命令、成功命令省略冗余输出预览、失败命令保留 160 字符预览、完整日志存于 `raw_log`），并用 `--output-schema` 强约束结构化回执。
 - **工作树隔离与互斥写锁。** 每次 `ship` 独占 linked git worktree 与非阻塞写锁（并发冲突返回退出码 `3`），自动在 `.git/info/exclude` 排除 `.codex-use/`，并安全清理 `__pycache__` 等缓存目录。
+- **零复制粘贴挂载活跃终端 TUI（`attach`）。** 终端里已经开着交互式 `codex` TUI？`drive.py attach --cwd /path/to/repo` 通过跨平台标准库 WebSocket（macOS/Linux `AF_UNIX` 或 `--remote ws://host:port`）自动在 Layer A 守护进程发现对应会话，不抢写锁、不覆盖 TUI originator，基于 `selectors` 无轮询流式采集实跑命令并生成 `AuditSummary`，遇到终端审批阻塞默认立即唤醒宿主，并在退出时可靠退订。
 
 ## 这是一个可随手改造的框架，不是锁死的黑盒
 
@@ -67,9 +68,9 @@
 ```text
 你（轻松收干净 Diff，保持好心情）
   -> 宿主 Agent（Antigravity / Grok Bot / DSH / Claude Code / 任意 SKILL.md 宿主）
-       -> skills/codex-use/SKILL.md          （Worker 无关的 scout / ship / review 协议）
-       -> skills/codex-use/scripts/drive.py  （预检、工作树写锁、命令构造、JSONL 审计）
-            ├─ CodexAdapter + workers/codex.md   （codex exec / resume / review，任意 --model）
+       -> skills/codex-use/SKILL.md          （Worker 无关的 scout / ship / attach / review 协议）
+       -> skills/codex-use/scripts/drive.py  （预检、工作树写锁、命令构造、TUI 挂载、JSONL 审计）
+            ├─ CodexAdapter + workers/codex.md   （无头 exec/resume/review + Layer A 实时 TUI attach）
             └─ DshAdapter   + workers/dsh.md     （dsh --profile headless）
 ```
 
@@ -161,7 +162,23 @@ python3 skills/codex-use/scripts/drive.py resume \
   --prompt "修复 src/retry.py:42 的边界条件，并重新运行 python3 -m unittest。"
 ```
 
-### 5. 非交互审查、离线审计与缓存安全清理
+### 5. 零复制粘贴挂载活跃终端 TUI（`attach`）
+
+自动发现当前仓库下已加载的终端 `codex` TUI 会话，或直接把结构化任务排入实时 TUI 队列并回收审计结果：
+
+```bash
+python3 skills/codex-use/scripts/drive.py sessions --cwd /path/to/repo
+
+python3 skills/codex-use/scripts/drive.py attach \
+  --cwd /path/to/repo \
+  --mode ship \
+  --schema skills/codex-use/schemas/receipt.schema.json \
+  --prompt-file /path/to/repo/.codex-use/fix-retry.md
+```
+
+当同一 `--cwd` 存在多个活跃 TUI 会话且未指定 `--session` 或 `--latest` 时，`attach` 默认安全拒绝（退出码 `2` 并列出候选会话）；同时精准识别 Codex 桌面版或 VS Code 持有的 Layer B 写锁（退出码 `3`），绝不自动代点终端审批（默认立即返回 `status="approval_required"`，显式传入 `--wait-for-approval` 才持续等待），并支持 `--remote ws://host:port` 连接远端服务。
+
+### 6. 非交互审查、离线审计与缓存安全清理
 
 ```bash
 python3 skills/codex-use/scripts/drive.py review --worker codex --model gpt-6.2-astra --cwd /path/to/worktree --base main

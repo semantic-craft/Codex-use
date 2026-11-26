@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
 import re
+import socket
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -1194,6 +1200,1513 @@ class RepositoryContractTests(unittest.TestCase):
                     content,
                     f"Private token {token!r} leaked in {path.relative_to(REPO_ROOT)}",
                 )
+            if path.suffix == ".md":
+                self.assertNotIn(
+                    "\u2014",
+                    content,
+                    f"Em-dash found in markdown file {path.relative_to(REPO_ROOT)}",
+                )
+
+
+class _MockWsConnection:
+    def __init__(self, conn: socket.socket) -> None:
+        self.conn = conn
+        self.buf = bytearray()
+        self.request_path = ""
+        self.headers: dict[str, str] = {}
+        self.pong_payloads: list[bytes] = []
+
+    def handshake(self, max_frame_bytes: int = 16 * 1024 * 1024) -> None:
+        while b"\r\n\r\n" not in self.buf:
+            chunk = self.conn.recv(4096)
+            if not chunk:
+                raise EOFError("client closed during handshake")
+            self.buf.extend(chunk)
+        idx = self.buf.index(b"\r\n\r\n")
+        raw = bytes(self.buf[:idx]).decode("iso-8859-1")
+        del self.buf[: idx + 4]
+        lines = raw.split("\r\n")
+        parts = lines[0].split(" ")
+        self.request_path = parts[1] if len(parts) >= 2 else "/"
+        for line in lines[1:]:
+            if ":" in line:
+                k, v = line.split(":", 1)
+                self.headers[k.strip().lower()] = v.strip()
+        if "x-codex-app-server-compression" in self.headers:
+            raise AssertionError("Client must not negotiate zstd compression")
+        sec_key = self.headers["sec-websocket-key"]
+        accept = base64.b64encode(
+            hashlib.sha1((sec_key + drive.WS_GUID).encode("ascii")).digest()
+        ).decode("ascii")
+        resp = (
+            "HTTP/1.1 101 Switching Protocols\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Accept: {accept}\r\n"
+            f"x-codex-websocket-max-unfragmented-message-bytes: {max_frame_bytes}\r\n\r\n"
+        )
+        self.conn.sendall(resp.encode("ascii"))
+
+    def _read_exact(self, n: int) -> bytes:
+        while len(self.buf) < n:
+            chunk = self.conn.recv(65536)
+            if not chunk:
+                raise EOFError("client closed websocket")
+            self.buf.extend(chunk)
+        out = bytes(self.buf[:n])
+        del self.buf[:n]
+        return out
+
+    def recv_json(self) -> dict | None:
+        fragments: list[bytes] = []
+        while True:
+            b0, b1 = self._read_exact(2)
+            fin = bool(b0 & 0x80)
+            opcode = b0 & 0x0F
+            masked = bool(b1 & 0x80)
+            if not masked:
+                raise AssertionError("RFC 6455 requires client-to-server frames to be masked")
+            length = b1 & 0x7F
+            if length == 126:
+                length = struct.unpack(">H", self._read_exact(2))[0]
+            elif length == 127:
+                length = struct.unpack(">Q", self._read_exact(8))[0]
+            mask = self._read_exact(4)
+            payload = drive._xor_mask(self._read_exact(length), mask)
+            if opcode == 0x8:
+                return None
+            if opcode == 0xA:
+                self.pong_payloads.append(payload)
+                continue
+            if opcode == 0x9:
+                self.send_frame(0xA, payload)
+                continue
+            fragments.append(payload)
+            if fin:
+                return json.loads(b"".join(fragments).decode("utf-8"))
+
+    def send_frame(self, opcode: int, payload: bytes, fin: bool = True) -> None:
+        b0 = (0x80 if fin else 0x00) | (opcode & 0x0F)
+        n = len(payload)
+        if n < 126:
+            hdr = bytes([b0, n])
+        elif n < 65536:
+            hdr = bytes([b0, 126]) + struct.pack(">H", n)
+        else:
+            hdr = bytes([b0, 127]) + struct.pack(">Q", n)
+        self.conn.sendall(hdr + payload)
+
+    def send_json(self, obj: dict, fragmented: bool = False) -> None:
+        raw = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        if fragmented and len(raw) > 8:
+            mid = len(raw) // 2
+            self.send_frame(0x1, raw[:mid], fin=False)
+            self.send_frame(0x0, raw[mid:], fin=True)
+        else:
+            self.send_frame(0x1, raw, fin=True)
+
+
+class _MockAppServer:
+    def __init__(
+        self,
+        threads: list[dict],
+        on_dispatch: callable | None = None,
+        unix_path: Path | None = None,
+        max_frame_bytes: int = 16 * 1024 * 1024,
+        no_rollout_thread_ids: set[str] | None = None,
+        replay_on_resume: list[dict] | None = None,
+    ) -> None:
+        self.threads = {t["id"]: dict(t) for t in threads}
+        self.on_dispatch = on_dispatch
+        self.unix_path = unix_path
+        self.max_frame_bytes = max_frame_bytes
+        self.no_rollout_thread_ids = set(no_rollout_thread_ids or ())
+        self.replay_on_resume = list(replay_on_resume or ())
+        self.received_messages: list[dict] = []
+        self.handshake_headers: list[dict[str, str]] = []
+        self.pong_payloads: list[bytes] = []
+        self.unsubscribed_threads: list[str] = []
+        self.approval_responses: list[dict] = []
+        self._stop = threading.Event()
+
+        if unix_path is not None:
+            self.server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.server_sock.bind(str(unix_path))
+            self.port = None
+        else:
+            self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server_sock.bind(("127.0.0.1", 0))
+            self.port = self.server_sock.getsockname()[1]
+        self.server_sock.listen(8)
+        self.server_sock.settimeout(0.2)
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _ = self.server_sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            t = threading.Thread(target=self._handle_client, args=(conn,), daemon=True)
+            t.start()
+
+    def _handle_client(self, conn: socket.socket) -> None:
+        ws = _MockWsConnection(conn)
+        try:
+            ws.handshake(max_frame_bytes=self.max_frame_bytes)
+            self.handshake_headers.append(dict(ws.headers))
+            while not self._stop.is_set():
+                msg = ws.recv_json()
+                if msg is None:
+                    break
+                self.received_messages.append(msg)
+                if "method" not in msg and "id" in msg:
+                    self.approval_responses.append(msg)
+                    continue
+                method = msg.get("method")
+                req_id = msg.get("id")
+                params = msg.get("params") or {}
+                if method == "initialize":
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "result": {
+                                "userAgent": "codex-mock/0.171.0",
+                                "codexHome": "/tmp/mock-codex",
+                                "platformFamily": "unix",
+                                "platformOs": "macos",
+                            },
+                        }
+                    )
+                elif method == "initialized":
+                    continue
+                elif method == "thread/loaded/list":
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "result": {"data": list(self.threads.keys()), "nextCursor": None},
+                        }
+                    )
+                elif method == "thread/read":
+                    tid = params["threadId"]
+                    if tid not in self.threads:
+                        ws.send_json(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": req_id,
+                                "error": {"code": -32600, "message": f"unknown thread {tid}"},
+                            }
+                        )
+                    else:
+                        ws.send_json(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": req_id,
+                                "result": {"thread": self.threads[tid]},
+                            }
+                        )
+                elif method == "thread/resume":
+                    tid = params["threadId"]
+                    if tid in self.no_rollout_thread_ids:
+                        ws.send_json(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": req_id,
+                                "error": {
+                                    "code": -32600,
+                                    "message": f"no rollout found for thread id {tid}",
+                                },
+                            }
+                        )
+                    else:
+                        for replay_frame in self.replay_on_resume:
+                            ws.send_json(replay_frame)
+                        ws.send_json(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": req_id,
+                                "result": {"thread": self.threads[tid]},
+                            }
+                        )
+                elif method == "thread/unsubscribe":
+                    tid = params["threadId"]
+                    self.unsubscribed_threads.append(tid)
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "result": {"status": "unsubscribed"},
+                        }
+                    )
+                elif method in {"thread/queue/add", "turn/start"}:
+                    tid = params["threadId"]
+                    self.no_rollout_thread_ids.discard(tid)
+                    if self.on_dispatch is not None:
+                        self.on_dispatch(ws, method, req_id, params, self)
+            self.pong_payloads.extend(ws.pong_payloads)
+        except (EOFError, OSError):
+            self.pong_payloads.extend(ws.pong_payloads)
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    def close(self) -> None:
+        self._stop.set()
+        try:
+            self.server_sock.close()
+        except OSError:
+            pass
+        self._thread.join(timeout=2.0)
+
+
+class TuiAttachTests(unittest.TestCase):
+    def test_sessions_and_attach_auto_discovery_by_cwd_over_unix_socket(self) -> None:
+        receipt_obj = {
+            "summary": "Implemented retry clamp and verified unit tests in live TUI.",
+            "changed_files": ["README.md"],
+            "verification": [
+                {
+                    "command": "python3 -m unittest",
+                    "exit_code": 0,
+                    "summary": "All tests passed.",
+                }
+            ],
+            "assumptions_and_risks": [],
+            "symbol_changes": ["clamp_retry (added)"],
+        }
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory(dir="/tmp") as sock_td:
+            root = Path(td)
+            repo = _init_temp_repo(root)
+            subdir = repo / "packages" / "core"
+            subdir.mkdir(parents=True)
+            codex_home = root / "codex-home"
+            control_dir = codex_home / "app-server-control"
+            control_dir.mkdir(parents=True)
+            real_sock = Path(sock_td) / "daemon.sock"
+            symlink_sock = control_dir / "app-server-control.sock"
+            symlink_sock.symlink_to(real_sock)
+
+            threads = [
+                {
+                    "id": "019d0000-1111-7000-8000-000000000001",
+                    "cwd": str(subdir),
+                    "name": "Live repo TUI",
+                    "preview": "Working on core package",
+                    "ephemeral": False,
+                    "parentThreadId": None,
+                    "source": "vscode",
+                    "originator": "codex-tui",
+                    "model": "gpt-6.2-codex",
+                    "updatedAt": 1764200100,
+                    "createdAt": 1764200000,
+                    "status": {"type": "idle"},
+                },
+                {
+                    "id": "019d0000-1111-7000-8000-000000000002",
+                    "cwd": str(repo),
+                    "name": "Ephemeral helper",
+                    "preview": "helper",
+                    "ephemeral": True,
+                    "parentThreadId": None,
+                    "source": "cli",
+                    "status": {"type": "idle"},
+                },
+                {
+                    "id": "019d0000-1111-7000-8000-000000000003",
+                    "cwd": str(repo),
+                    "name": "Spawned subagent",
+                    "preview": "sub",
+                    "ephemeral": False,
+                    "parentThreadId": "019d0000-1111-7000-8000-000000000001",
+                    "source": {"subAgent": {"thread_spawn": {"parent_thread_id": "019d0000-1111-7000-8000-000000000001"}}},
+                    "status": {"type": "active", "activeFlags": []},
+                },
+                {
+                    "id": "019d0000-1111-7000-8000-000000000004",
+                    "cwd": str(root),
+                    "name": "Other directory TUI",
+                    "preview": "unrelated",
+                    "ephemeral": False,
+                    "parentThreadId": None,
+                    "source": "cli",
+                    "status": {"type": "idle"},
+                },
+            ]
+
+            def on_dispatch(ws: _MockWsConnection, method: str, req_id: int, params: dict, srv: _MockAppServer) -> None:
+                self.assertEqual(method, "turn/start")
+                self.assertIn("outputSchema", params)
+                turn_id = "turn-live-1"
+                tid = params["threadId"]
+                client_msg_id = params["clientUserMessageId"]
+                ws.send_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "result": {"turn": {"id": turn_id, "status": "inProgress"}},
+                    }
+                )
+                ws.send_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "turn/started",
+                        "params": {"threadId": tid, "turn": {"id": turn_id, "status": "inProgress"}},
+                    }
+                )
+                ws.send_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "item/started",
+                        "params": {
+                            "threadId": tid,
+                            "turnId": turn_id,
+                            "item": {"id": "u1", "type": "userMessage", "clientId": client_msg_id},
+                        },
+                    }
+                )
+                ws.send_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "item/completed",
+                        "params": {
+                            "threadId": tid,
+                            "turnId": turn_id,
+                            "item": {
+                                "id": "c1",
+                                "type": "commandExecution",
+                                "command": "python3 -m unittest",
+                                "exitCode": 0,
+                                "status": "completed",
+                                "aggregatedOutput": "Ran 5 tests\nOK\n",
+                            },
+                        },
+                    }
+                )
+                ws.send_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "item/completed",
+                        "params": {
+                            "threadId": tid,
+                            "turnId": turn_id,
+                            "item": {
+                                "id": "f1",
+                                "type": "fileChange",
+                                "changes": [{"path": "README.md", "kind": "update"}],
+                                "status": "completed",
+                            },
+                        },
+                    }
+                )
+                ws.send_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "item/completed",
+                        "params": {
+                            "threadId": tid,
+                            "turnId": turn_id,
+                            "item": {
+                                "id": "m1",
+                                "type": "agentMessage",
+                                "text": json.dumps(receipt_obj),
+                            },
+                        },
+                    }
+                )
+                ws.send_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "thread/tokenUsage/updated",
+                        "params": {
+                            "threadId": tid,
+                            "turnId": turn_id,
+                            "tokenUsage": {
+                                "last": {"inputTokens": 500, "outputTokens": 120, "totalTokens": 620}
+                            },
+                        },
+                    }
+                )
+                ws.send_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "turn/completed",
+                        "params": {"threadId": tid, "turn": {"id": turn_id, "status": "completed"}},
+                    }
+                )
+
+            srv = _MockAppServer(threads=threads, on_dispatch=on_dispatch, unix_path=real_sock)
+            try:
+                env = {"CODEX_HOME": str(codex_home)}
+                ses_proc = _run_drive(["sessions", "--cwd", str(repo)], env=env)
+                self.assertEqual(ses_proc.returncode, drive.EXIT_OK, ses_proc.stdout + ses_proc.stderr)
+                ses_data = json.loads(ses_proc.stdout)
+                self.assertTrue(ses_data["ok"])
+                self.assertEqual(len(ses_data["sessions"]), 1)
+                self.assertEqual(
+                    ses_data["sessions"][0]["thread_id"],
+                    "019d0000-1111-7000-8000-000000000001",
+                )
+
+                list_proc = _run_drive(["attach", "--list", "--cwd", str(repo)], env=env)
+                self.assertEqual(list_proc.returncode, drive.EXIT_OK)
+                self.assertEqual(len(json.loads(list_proc.stdout)["sessions"]), 1)
+
+                schema_path = SKILL_ROOT / "schemas" / "receipt.schema.json"
+                log_dir = root / "logs"
+                att_proc = _run_drive(
+                    [
+                        "attach",
+                        "--cwd",
+                        str(repo),
+                        "--mode",
+                        "ship",
+                        "--schema",
+                        str(schema_path),
+                        "--log-dir",
+                        str(log_dir),
+                        "--prompt",
+                        "Implement retry clamp and return JSON receipt.",
+                    ],
+                    env=env,
+                )
+                self.assertEqual(att_proc.returncode, drive.EXIT_OK, att_proc.stdout + att_proc.stderr)
+                summary = json.loads(att_proc.stdout)
+                self.assertEqual(summary["status"], "completed")
+                self.assertEqual(summary["session_id"], "019d0000-1111-7000-8000-000000000001")
+                self.assertTrue(summary["receipt_valid"])
+                self.assertIsNone(summary["final_message"])
+                self.assertEqual(len(summary["commands"]), 1)
+                self.assertEqual(summary["commands"][0]["exit_code"], 0)
+                self.assertNotIn("output_preview", summary["commands"][0])
+                self.assertEqual(summary["changed_files"], ["README.md"])
+                self.assertEqual(summary["usage"]["totalTokens"], 620)
+
+                init_msgs = [m for m in srv.received_messages if m.get("method") == "initialize"]
+                self.assertTrue(init_msgs)
+                for im in init_msgs:
+                    self.assertEqual(
+                        im["params"]["clientInfo"]["name"],
+                        drive.NON_ORIGINATING_CLIENT_NAME,
+                    )
+                    self.assertTrue(im["params"]["capabilities"]["experimentalApi"])
+                self.assertIn(
+                    "019d0000-1111-7000-8000-000000000001",
+                    srv.unsubscribed_threads,
+                )
+
+                reaudit = _run_drive(
+                    [
+                        "audit",
+                        "--worker",
+                        "codex",
+                        "--log",
+                        summary["raw_log"],
+                        "--mode",
+                        "ship",
+                    ]
+                )
+                self.assertEqual(reaudit.returncode, drive.EXIT_OK)
+                reaudited = json.loads(reaudit.stdout)
+                self.assertTrue(reaudited["receipt_valid"])
+                self.assertEqual(reaudited["commands"][0]["exit_code"], 0)
+            finally:
+                srv.close()
+
+    def test_attach_multi_thread_ambiguity_rejection_and_latest_override(self) -> None:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory(dir="/tmp") as sock_td:
+            root = Path(td)
+            repo = _init_temp_repo(root)
+            codex_home = root / "codex-home"
+            (codex_home / "app-server-control").mkdir(parents=True)
+            real_sock = Path(sock_td) / "ambig.sock"
+            (codex_home / "app-server-control" / "app-server-control.sock").symlink_to(real_sock)
+
+            threads = [
+                {
+                    "id": "thread-older",
+                    "cwd": str(repo),
+                    "name": "Older TUI",
+                    "preview": "first",
+                    "ephemeral": False,
+                    "parentThreadId": None,
+                    "source": "cli",
+                    "updatedAt": 100,
+                    "createdAt": 90,
+                    "status": {"type": "idle"},
+                },
+                {
+                    "id": "thread-newer",
+                    "cwd": str(repo),
+                    "name": "Newer TUI",
+                    "preview": "second",
+                    "ephemeral": False,
+                    "parentThreadId": None,
+                    "source": "cli",
+                    "updatedAt": 200,
+                    "createdAt": 150,
+                    "status": {"type": "active", "activeFlags": []},
+                },
+            ]
+
+            def on_dispatch(ws: _MockWsConnection, method: str, req_id: int, params: dict, srv: _MockAppServer) -> None:
+                tid = params["threadId"]
+                cid = params["clientUserMessageId"]
+                ws.send_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "result": {"queuedSubmission": {"id": "q1", "clientUserMessageId": cid, "input": []}},
+                    }
+                )
+                if tid == "thread-newer":
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "turn/completed",
+                            "params": {"threadId": tid, "turn": {"id": "prior-turn", "status": "completed"}},
+                        }
+                    )
+                ws.send_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "turn/started",
+                        "params": {"threadId": tid, "turn": {"id": f"turn-{tid}", "status": "inProgress"}},
+                    }
+                )
+                ws.send_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "item/started",
+                        "params": {
+                            "threadId": tid,
+                            "turnId": f"turn-{tid}",
+                            "item": {"id": "u1", "type": "userMessage", "clientId": cid},
+                        },
+                    }
+                )
+                ws.send_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "item/completed",
+                        "params": {
+                            "threadId": tid,
+                            "turnId": f"turn-{tid}",
+                            "item": {"id": "m1", "type": "agentMessage", "text": f"handled by {tid}"},
+                        },
+                    }
+                )
+                ws.send_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "turn/completed",
+                        "params": {"threadId": tid, "turn": {"id": f"turn-{tid}", "status": "completed"}},
+                    }
+                )
+
+            srv = _MockAppServer(threads=threads, on_dispatch=on_dispatch, unix_path=real_sock)
+            try:
+                env = {"CODEX_HOME": str(codex_home)}
+                ambig = _run_drive(
+                    ["attach", "--cwd", str(repo), "--mode", "scout", "--prompt", "check status"],
+                    env=env,
+                )
+                self.assertEqual(ambig.returncode, drive.EXIT_INVALID_ARGS)
+                ambig_payload = json.loads(ambig.stdout)
+                self.assertEqual(ambig_payload["error"], "ambiguous_tui_threads")
+                self.assertEqual(len(ambig_payload["candidates"]), 2)
+                self.assertEqual(
+                    {c["thread_id"] for c in ambig_payload["candidates"]},
+                    {"thread-older", "thread-newer"},
+                )
+                for cand in ambig_payload["candidates"]:
+                    for key in ("thread_id", "title", "cwd", "status"):
+                        self.assertIn(key, cand)
+
+                latest = _run_drive(
+                    [
+                        "attach",
+                        "--cwd",
+                        str(repo),
+                        "--latest",
+                        "--mode",
+                        "scout",
+                        "--prompt",
+                        "check status",
+                    ],
+                    env=env,
+                )
+                self.assertEqual(latest.returncode, drive.EXIT_OK, latest.stdout + latest.stderr)
+                latest_payload = json.loads(latest.stdout)
+                self.assertEqual(latest_payload["session_id"], "thread-newer")
+                self.assertEqual(latest_payload["final_message"], "handled by thread-newer")
+
+                explicit = _run_drive(
+                    [
+                        "attach",
+                        "--cwd",
+                        str(repo),
+                        "--session",
+                        "thread-older",
+                        "--mode",
+                        "scout",
+                        "--prompt",
+                        "check older",
+                    ],
+                    env=env,
+                )
+                self.assertEqual(explicit.returncode, drive.EXIT_OK)
+                self.assertEqual(json.loads(explicit.stdout)["session_id"], "thread-older")
+            finally:
+                srv.close()
+
+    def test_attach_idle_vs_active_queue_correlation_and_zero_turn_thread_over_ws_tcp(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = _init_temp_repo(root)
+            threads = [
+                {
+                    "id": "thread-active",
+                    "cwd": str(repo),
+                    "name": "Active TUI",
+                    "preview": "busy",
+                    "ephemeral": False,
+                    "parentThreadId": None,
+                    "source": "cli",
+                    "status": {"type": "active", "activeFlags": []},
+                },
+                {
+                    "id": "thread-zero-turn",
+                    "cwd": str(root),
+                    "name": "Brand new 0-turn TUI",
+                    "preview": "",
+                    "ephemeral": False,
+                    "parentThreadId": None,
+                    "source": "cli",
+                    "status": {"type": "idle"},
+                },
+            ]
+
+            def on_dispatch(ws: _MockWsConnection, method: str, req_id: int, params: dict, srv: _MockAppServer) -> None:
+                self.assertEqual(method, "thread/queue/add")
+                tid = params["threadId"]
+                cid = params["clientUserMessageId"]
+                ws.send_frame(0x9, b"keepalive")
+                ws.send_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "result": {"queuedSubmission": {"id": "q-live", "clientUserMessageId": cid, "input": []}},
+                    }
+                )
+                if tid == "thread-active":
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "item/completed",
+                            "params": {
+                                "threadId": tid,
+                                "turnId": "turn-prior",
+                                "item": {
+                                    "id": "old-c1",
+                                    "type": "commandExecution",
+                                    "command": "echo old_turn_noise",
+                                    "exitCode": 1,
+                                    "status": "failed",
+                                    "aggregatedOutput": "old failure",
+                                },
+                            },
+                        }
+                    )
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "item/completed",
+                            "params": {
+                                "threadId": tid,
+                                "turnId": "turn-prior",
+                                "item": {"id": "old-m1", "type": "agentMessage", "text": "STALE_PRIOR_TURN"},
+                            },
+                        }
+                    )
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "turn/completed",
+                            "params": {"threadId": tid, "turn": {"id": "turn-prior", "status": "completed"}},
+                        }
+                    )
+
+                def _emit_our_turn() -> None:
+                    time.sleep(0.03)
+                    try:
+                        ws.send_json(
+                            {
+                                "jsonrpc": "2.0",
+                                "method": "turn/started",
+                                "params": {"threadId": tid, "turn": {"id": "turn-queued", "status": "inProgress"}},
+                            }
+                        )
+                        ws.send_json(
+                            {
+                                "jsonrpc": "2.0",
+                                "method": "item/started",
+                                "params": {
+                                    "threadId": tid,
+                                    "turnId": "turn-queued",
+                                    "item": {"id": "u-ours", "type": "userMessage", "clientId": cid},
+                                },
+                            }
+                        )
+                        ws.send_json(
+                            {
+                                "jsonrpc": "2.0",
+                                "method": "item/completed",
+                                "params": {
+                                    "threadId": tid,
+                                    "turnId": "turn-queued",
+                                    "item": {
+                                        "id": "c-ours",
+                                        "type": "commandExecution",
+                                        "command": "pytest -q",
+                                        "exitCode": 0,
+                                        "status": "completed",
+                                        "aggregatedOutput": "3 passed",
+                                    },
+                                },
+                            }
+                        )
+                        ws.send_json(
+                            {
+                                "jsonrpc": "2.0",
+                                "method": "item/completed",
+                                "params": {
+                                    "threadId": tid,
+                                    "turnId": "turn-queued",
+                                    "item": {
+                                        "id": "m-ours",
+                                        "type": "agentMessage",
+                                        "text": f"Queued slice completed on {tid} over fragmented frame.",
+                                    },
+                                },
+                            },
+                            fragmented=True,
+                        )
+                        ws.send_json(
+                            {
+                                "jsonrpc": "2.0",
+                                "method": "turn/completed",
+                                "params": {"threadId": tid, "turn": {"id": "turn-queued", "status": "completed"}},
+                            }
+                        )
+                    except OSError:
+                        pass
+
+                threading.Thread(target=_emit_our_turn, daemon=True).start()
+
+            srv = _MockAppServer(
+                threads=threads,
+                on_dispatch=on_dispatch,
+                unix_path=None,
+                no_rollout_thread_ids={"thread-zero-turn"},
+            )
+            try:
+                remote_url = f"ws://127.0.0.1:{srv.port}/rpc"
+                env = {"CODEX_HOME": str(root / "empty-codex"), "TEST_REMOTE_TOKEN": "secret-tok-123"}
+                queued_proc = _run_drive(
+                    [
+                        "attach",
+                        "--cwd",
+                        str(repo),
+                        "--mode",
+                        "scout",
+                        "--remote",
+                        remote_url,
+                        "--remote-auth-token-env",
+                        "TEST_REMOTE_TOKEN",
+                        "--prompt",
+                        "Run queued scout check.",
+                    ],
+                    env=env,
+                )
+                self.assertEqual(queued_proc.returncode, drive.EXIT_OK, queued_proc.stdout + queued_proc.stderr)
+                q_summary = json.loads(queued_proc.stdout)
+                self.assertEqual(q_summary["status"], "completed")
+                self.assertEqual(len(q_summary["commands"]), 1)
+                self.assertEqual(q_summary["commands"][0]["command"], "pytest -q")
+                self.assertEqual(
+                    q_summary["final_message"],
+                    "Queued slice completed on thread-active over fragmented frame.",
+                )
+                self.assertEqual(srv.handshake_headers[0].get("authorization"), "Bearer secret-tok-123")
+                self.assertIn(b"keepalive", srv.pong_payloads)
+
+                reaudit_queued = _run_drive(
+                    [
+                        "audit",
+                        "--worker",
+                        "codex",
+                        "--log",
+                        q_summary["raw_log"],
+                        "--mode",
+                        "scout",
+                    ]
+                )
+                self.assertEqual(
+                    reaudit_queued.returncode,
+                    drive.EXIT_OK,
+                    reaudit_queued.stdout + reaudit_queued.stderr,
+                )
+                reaudit_q_data = json.loads(reaudit_queued.stdout)
+                self.assertEqual(len(reaudit_q_data["commands"]), 1)
+                self.assertEqual(reaudit_q_data["commands"][0]["command"], "pytest -q")
+                self.assertNotIn("old_turn_noise", json.dumps(reaudit_q_data))
+                self.assertEqual(
+                    reaudit_q_data["final_message"],
+                    "Queued slice completed on thread-active over fragmented frame.",
+                )
+
+                zero_turn_proc = _run_drive(
+                    [
+                        "attach",
+                        "--session",
+                        "thread-zero-turn",
+                        "--mode",
+                        "scout",
+                        "--remote",
+                        remote_url,
+                        "--prompt",
+                        "First turn in brand new TUI.",
+                    ],
+                    env=env,
+                )
+                self.assertEqual(
+                    zero_turn_proc.returncode,
+                    drive.EXIT_OK,
+                    zero_turn_proc.stdout + zero_turn_proc.stderr,
+                )
+                zt_summary = json.loads(zero_turn_proc.stdout)
+                self.assertEqual(zt_summary["status"], "completed")
+                self.assertIn("thread-zero-turn", zt_summary["final_message"])
+                self.assertIn("thread-zero-turn", srv.unsubscribed_threads)
+            finally:
+                srv.close()
+
+    def test_attach_passive_observer_approval_wakeup_and_wait_for_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory(dir="/tmp") as sock_td:
+            root = Path(td)
+            repo = _init_temp_repo(root)
+            codex_home = root / "codex-home"
+            (codex_home / "app-server-control").mkdir(parents=True)
+            real_sock = Path(sock_td) / "approval.sock"
+            (codex_home / "app-server-control" / "app-server-control.sock").symlink_to(real_sock)
+
+            mode_holder = {"kind": "command_approval"}
+            threads = [
+                {
+                    "id": "thread-approval",
+                    "cwd": str(repo),
+                    "name": "Approval TUI",
+                    "preview": "approval test",
+                    "ephemeral": False,
+                    "parentThreadId": None,
+                    "source": "cli",
+                    "status": {"type": "idle"},
+                }
+            ]
+
+            def on_dispatch(ws: _MockWsConnection, method: str, req_id: int, params: dict, srv: _MockAppServer) -> None:
+                tid = params["threadId"]
+                cid = params["clientUserMessageId"]
+                ws.send_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "result": {"queuedSubmission": {"id": "q-app", "clientUserMessageId": cid, "input": []}},
+                    }
+                )
+                ws.send_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "turn/started",
+                        "params": {"threadId": tid, "turn": {"id": "turn-app", "status": "inProgress"}},
+                    }
+                )
+                ws.send_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "item/started",
+                        "params": {
+                            "threadId": tid,
+                            "turnId": "turn-app",
+                            "item": {"id": "u-app", "type": "userMessage", "clientId": cid},
+                        },
+                    }
+                )
+                if mode_holder["kind"] == "command_approval":
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 9001,
+                            "method": "item/commandExecution/requestApproval",
+                            "params": {
+                                "threadId": tid,
+                                "turnId": "turn-app",
+                                "itemId": "cmd-1",
+                                "command": "rm -rf build/",
+                                "reason": "Needs sandbox escalation",
+                            },
+                        }
+                    )
+                elif mode_holder["kind"] == "user_input":
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 9002,
+                            "method": "item/tool/requestUserInput",
+                            "params": {
+                                "threadId": tid,
+                                "turnId": "turn-app",
+                                "itemId": "ask-1",
+                                "isBlocking": True,
+                                "questions": [{"question": "Which target environment?"}],
+                            },
+                        }
+                    )
+                elif mode_holder["kind"] == "wait_then_complete":
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 9003,
+                            "method": "item/commandExecution/requestApproval",
+                            "params": {
+                                "threadId": tid,
+                                "turnId": "turn-app",
+                                "itemId": "cmd-2",
+                                "command": "git clean -fd",
+                            },
+                        }
+                    )
+
+                    def _user_approves_in_tui() -> None:
+                        time.sleep(0.05)
+                        ws.send_json(
+                            {
+                                "jsonrpc": "2.0",
+                                "method": "item/completed",
+                                "params": {
+                                    "threadId": tid,
+                                    "turnId": "turn-app",
+                                    "item": {"id": "m-ok", "type": "agentMessage", "text": "Approved in TUI."},
+                                },
+                            }
+                        )
+                        ws.send_json(
+                            {
+                                "jsonrpc": "2.0",
+                                "method": "turn/completed",
+                                "params": {"threadId": tid, "turn": {"id": "turn-app", "status": "completed"}},
+                            }
+                        )
+
+                    threading.Thread(target=_user_approves_in_tui, daemon=True).start()
+
+            srv = _MockAppServer(threads=threads, on_dispatch=on_dispatch, unix_path=real_sock)
+            try:
+                env = {"CODEX_HOME": str(codex_home)}
+                app_proc = _run_drive(
+                    ["attach", "--cwd", str(repo), "--timeout", "3", "--prompt", "clean build"],
+                    env=env,
+                )
+                self.assertEqual(app_proc.returncode, drive.EXIT_ERROR)
+                app_summary = json.loads(app_proc.stdout)
+                self.assertEqual(app_summary["status"], "approval_required")
+                self.assertTrue(any("rm -rf build/" in e for e in app_summary["errors"]))
+                self.assertEqual(srv.approval_responses, [])
+                self.assertEqual(len(srv.unsubscribed_threads), 1)
+
+                mode_holder["kind"] = "user_input"
+                ui_proc = _run_drive(
+                    ["attach", "--cwd", str(repo), "--timeout", "3", "--prompt", "deploy"],
+                    env=env,
+                )
+                self.assertEqual(ui_proc.returncode, drive.EXIT_ERROR)
+                ui_summary = json.loads(ui_proc.stdout)
+                self.assertEqual(ui_summary["status"], "user_input_required")
+                self.assertTrue(any("Which target environment?" in e for e in ui_summary["errors"]))
+                self.assertEqual(srv.approval_responses, [])
+                self.assertEqual(len(srv.unsubscribed_threads), 2)
+
+                mode_holder["kind"] = "wait_then_complete"
+                wait_proc = _run_drive(
+                    [
+                        "attach",
+                        "--cwd",
+                        str(repo),
+                        "--wait-for-approval",
+                        "--timeout",
+                        "3",
+                        "--prompt",
+                        "clean with user approval",
+                    ],
+                    env=env,
+                )
+                self.assertEqual(wait_proc.returncode, drive.EXIT_OK, wait_proc.stdout + wait_proc.stderr)
+                wait_summary = json.loads(wait_proc.stdout)
+                self.assertEqual(wait_summary["status"], "completed")
+                self.assertEqual(wait_summary["final_message"], "Approved in TUI.")
+                self.assertEqual(srv.approval_responses, [])
+                self.assertEqual(len(srv.unsubscribed_threads), 3)
+            finally:
+                srv.close()
+
+    def test_attach_unsubscribe_on_failure_timeout_and_desktop_writer_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory(dir="/tmp") as sock_td:
+            root = Path(td)
+            repo = _init_temp_repo(root)
+            codex_home = root / "codex-home"
+            (codex_home / "app-server-control").mkdir(parents=True)
+            real_sock = Path(sock_td) / "lifecycle.sock"
+            (codex_home / "app-server-control" / "app-server-control.sock").symlink_to(real_sock)
+
+            behavior = {"mode": "fail"}
+            threads = [
+                {
+                    "id": "thread-life",
+                    "cwd": str(repo),
+                    "name": "Lifecycle TUI",
+                    "preview": "test",
+                    "ephemeral": False,
+                    "parentThreadId": None,
+                    "source": "cli",
+                    "status": {"type": "idle"},
+                }
+            ]
+
+            def on_dispatch(ws: _MockWsConnection, method: str, req_id: int, params: dict, srv: _MockAppServer) -> None:
+                tid = params["threadId"]
+                cid = params["clientUserMessageId"]
+                ws.send_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "result": {"queuedSubmission": {"id": "q-life", "clientUserMessageId": cid, "input": []}},
+                    }
+                )
+                ws.send_json(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "turn/started",
+                        "params": {"threadId": tid, "turn": {"id": "turn-life", "status": "inProgress"}},
+                    }
+                )
+                if behavior["mode"] == "fail":
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "turn/completed",
+                            "params": {
+                                "threadId": tid,
+                                "turn": {
+                                    "id": "turn-life",
+                                    "status": "failed",
+                                    "error": {"message": "Upstream model rate limit"},
+                                },
+                            },
+                        }
+                    )
+                elif behavior["mode"] == "scout_mutate":
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "item/completed",
+                            "params": {
+                                "threadId": tid,
+                                "turnId": "turn-life",
+                                "item": {
+                                    "id": "f-bad",
+                                    "type": "fileChange",
+                                    "changes": [{"path": "README.md", "kind": "update"}],
+                                },
+                            },
+                        }
+                    )
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "turn/completed",
+                            "params": {"threadId": tid, "turn": {"id": "turn-life", "status": "completed"}},
+                        }
+                    )
+
+            srv = _MockAppServer(threads=threads, on_dispatch=on_dispatch, unix_path=real_sock)
+            try:
+                env = {"CODEX_HOME": str(codex_home)}
+                fail_proc = _run_drive(
+                    ["attach", "--cwd", str(repo), "--prompt", "trigger fail"],
+                    env=env,
+                )
+                self.assertEqual(fail_proc.returncode, drive.EXIT_ERROR)
+                fail_summary = json.loads(fail_proc.stdout)
+                self.assertEqual(fail_summary["status"], "failed")
+                self.assertIn("Upstream model rate limit", fail_summary["errors"])
+                self.assertEqual(len(srv.unsubscribed_threads), 1)
+
+                behavior["mode"] = "scout_mutate"
+                scout_bad = _run_drive(
+                    ["attach", "--cwd", str(repo), "--mode", "scout", "--prompt", "read only"],
+                    env=env,
+                )
+                self.assertEqual(scout_bad.returncode, drive.EXIT_ERROR)
+                self.assertTrue(
+                    any("scout_contract_violation" in e for e in json.loads(scout_bad.stdout)["errors"])
+                )
+                self.assertEqual(len(srv.unsubscribed_threads), 2)
+
+                behavior["mode"] = "stall"
+                timeout_proc = _run_drive(
+                    ["attach", "--cwd", str(repo), "--timeout", "0.15", "--prompt", "stall turn"],
+                    env=env,
+                )
+                self.assertEqual(timeout_proc.returncode, drive.EXIT_ERROR)
+                timeout_summary = json.loads(timeout_proc.stdout)
+                self.assertEqual(timeout_summary["status"], "timeout")
+                self.assertEqual(len(srv.unsubscribed_threads), 3)
+            finally:
+                srv.close()
+
+            desktop_repo = root / "desktop-repo"
+            desktop_repo.mkdir()
+            _git(desktop_repo, "init", "-b", "main")
+            desktop_tid = "019d9999-desktop-lock-thread"
+            locks_dir = codex_home / "thread-writer-locks"
+            locks_dir.mkdir(parents=True, exist_ok=True)
+            lock_file = locks_dir / f"{desktop_tid}.lock"
+            lock_file.write_bytes(b"")
+            rollout_dir = codex_home / "sessions" / "2026" / "11" / "27"
+            rollout_dir.mkdir(parents=True, exist_ok=True)
+            (rollout_dir / f"rollout-2026-11-27-{desktop_tid}.jsonl").write_text(
+                json.dumps({"type": "session_meta", "payload": {"id": desktop_tid, "cwd": str(desktop_repo)}})
+                + "\n",
+                encoding="utf-8",
+            )
+
+            holder = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        f"import fcntl, os, time; fd = os.open({str(lock_file)!r}, os.O_RDWR); "
+                        "fcntl.flock(fd, fcntl.LOCK_EX); print('HELD', flush=True); time.sleep(10)"
+                    ),
+                ],
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                assert holder.stdout is not None
+                self.assertEqual(holder.stdout.readline().strip(), "HELD")
+                offline_env = {"CODEX_HOME": str(codex_home), "PATH": os.path.dirname(sys.executable)}
+
+                by_session = _run_drive(
+                    ["attach", "--session", desktop_tid, "--prompt", "try desktop attach"],
+                    env=offline_env,
+                )
+                self.assertEqual(by_session.returncode, drive.EXIT_LOCK_CONFLICT)
+                self.assertEqual(json.loads(by_session.stdout)["error"], "desktop_writer_lock")
+
+                by_cwd = _run_drive(
+                    ["attach", "--cwd", str(desktop_repo), "--prompt", "try desktop cwd attach"],
+                    env=offline_env,
+                )
+                self.assertEqual(by_cwd.returncode, drive.EXIT_LOCK_CONFLICT)
+                cwd_err = json.loads(by_cwd.stdout)
+                self.assertEqual(cwd_err["error"], "desktop_writer_lock")
+                self.assertIn(desktop_tid, cwd_err["locked_thread_ids"])
+            finally:
+                if holder.stdout is not None:
+                    holder.stdout.close()
+                holder.terminate()
+                holder.wait(timeout=5)
+
+            offline_proc = _run_drive(
+                ["attach", "--cwd", str(desktop_repo), "--prompt", "when daemon is off"],
+                env={"CODEX_HOME": str(codex_home), "PATH": os.path.dirname(sys.executable)},
+            )
+            self.assertEqual(offline_proc.returncode, drive.EXIT_ERROR)
+            self.assertEqual(json.loads(offline_proc.stdout)["error"], "daemon_offline")
+
+    def test_attach_edge_races_zero_turn_failed_harvest_and_sqlite_numeric_order(self) -> None:
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory(dir="/tmp") as sock_td:
+            root = Path(td)
+            repo = _init_temp_repo(root)
+            codex_home = root / "codex-home"
+            (codex_home / "app-server-control").mkdir(parents=True)
+            real_sock = Path(sock_td) / "races.sock"
+            (codex_home / "app-server-control" / "app-server-control.sock").symlink_to(real_sock)
+
+            db5 = codex_home / "state_5.sqlite"
+            db10 = codex_home / "state_10.sqlite"
+            for db_p, cwd_val in ((db5, "/nonexistent/stale"), (db10, str(repo))):
+                con = sqlite3.connect(str(db_p))
+                con.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT)")
+                con.execute("INSERT INTO threads VALUES (?, ?)", ("sqlite-tid", cwd_val))
+                con.commit()
+                con.close()
+            self.assertEqual(
+                drive._lookup_thread_cwd_from_codex_home(codex_home, "sqlite-tid"),
+                str(repo),
+            )
+
+            threads = [
+                {
+                    "id": "thread-zero-fail",
+                    "cwd": str(root),
+                    "name": "Zero turn instant fail",
+                    "preview": "",
+                    "ephemeral": False,
+                    "parentThreadId": None,
+                    "source": "cli",
+                    "status": {"type": "idle"},
+                    "turns": [],
+                },
+                {
+                    "id": "thread-race",
+                    "cwd": str(repo),
+                    "name": "Simultaneous TUI race",
+                    "preview": "",
+                    "ephemeral": False,
+                    "parentThreadId": None,
+                    "source": "cli",
+                    "status": {"type": "active", "activeFlags": []},
+                },
+            ]
+
+            scenario = {"mode": "zero_fail"}
+
+            def on_dispatch(ws: _MockWsConnection, method: str, req_id: int, params: dict, srv: _MockAppServer) -> None:
+                tid = params["threadId"]
+                cid = params["clientUserMessageId"]
+                if scenario["mode"] == "zero_fail":
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "remoteControl/status/changed",
+                            "params": {"enabled": False},
+                        }
+                    )
+                    srv.threads[tid]["status"] = {"type": "idle"}
+                    srv.threads[tid]["turns"] = [
+                        {
+                            "id": "turn-0-fail",
+                            "status": "failed",
+                            "error": {"message": "0-turn sandbox setup failed"},
+                            "items": [
+                                {"id": "u0", "type": "userMessage", "clientId": cid},
+                            ],
+                        }
+                    ]
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "result": {"queuedSubmission": {"id": "q0", "clientUserMessageId": cid, "input": []}},
+                        }
+                    )
+                elif scenario["mode"] == "model_after_pending_idle":
+                    self.assertEqual(method, "turn/start")
+                    self.assertEqual(params.get("model"), "gpt-6.2-astra")
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "result": {"turn": {"id": "turn-override", "status": "inProgress"}},
+                        }
+                    )
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "item/completed",
+                            "params": {
+                                "threadId": tid,
+                                "turnId": "turn-override",
+                                "item": {"id": "m-ov", "type": "agentMessage", "text": "override turn ok"},
+                            },
+                        }
+                    )
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "turn/completed",
+                            "params": {"threadId": tid, "turn": {"id": "turn-override", "status": "completed"}},
+                        }
+                    )
+                elif scenario["mode"] == "simultaneous_enter":
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "result": {"queuedSubmission": {"id": "q-sim", "clientUserMessageId": cid, "input": []}},
+                        }
+                    )
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "turn/started",
+                            "params": {"threadId": tid, "turn": {"id": "turn-human", "status": "inProgress"}},
+                        }
+                    )
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "item/started",
+                            "params": {
+                                "threadId": tid,
+                                "turnId": "turn-human",
+                                "item": {"id": "u-human", "type": "userMessage", "clientId": "human-enter-id"},
+                            },
+                        }
+                    )
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "item/completed",
+                            "params": {
+                                "threadId": tid,
+                                "turnId": "turn-human",
+                                "item": {"id": "m-human", "type": "agentMessage", "text": "HUMAN_TURN_TEXT"},
+                            },
+                        }
+                    )
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "turn/completed",
+                            "params": {"threadId": tid, "turn": {"id": "turn-human", "status": "completed"}},
+                        }
+                    )
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "turn/started",
+                            "params": {"threadId": tid, "turn": {"id": "turn-agent", "status": "inProgress"}},
+                        }
+                    )
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "item/started",
+                            "params": {
+                                "threadId": tid,
+                                "turnId": "turn-agent",
+                                "item": {"id": "u-agent", "type": "userMessage", "clientId": cid},
+                            },
+                        }
+                    )
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "item/completed",
+                            "params": {
+                                "threadId": tid,
+                                "turnId": "turn-agent",
+                                "item": {"id": "m-agent", "type": "agentMessage", "text": "AGENT_TURN_TEXT"},
+                            },
+                        }
+                    )
+                    ws.send_json(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "turn/completed",
+                            "params": {"threadId": tid, "turn": {"id": "turn-agent", "status": "completed"}},
+                        }
+                    )
+
+            srv = _MockAppServer(
+                threads=threads,
+                on_dispatch=on_dispatch,
+                unix_path=real_sock,
+                no_rollout_thread_ids={"thread-zero-fail"},
+            )
+            try:
+                env = {"CODEX_HOME": str(codex_home)}
+                zf_proc = _run_drive(
+                    [
+                        "attach",
+                        "--session",
+                        "thread-zero-fail",
+                        "--mode",
+                        "scout",
+                        "--timeout",
+                        "2",
+                        "--prompt",
+                        "0-turn fail test",
+                    ],
+                    env=env,
+                )
+                self.assertEqual(zf_proc.returncode, drive.EXIT_ERROR)
+                zf_data = json.loads(zf_proc.stdout)
+                self.assertEqual(zf_data["status"], "failed")
+                self.assertIn("0-turn sandbox setup failed", zf_data["errors"])
+
+                scenario["mode"] = "model_after_pending_idle"
+                srv.replay_on_resume = [
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "turn/completed",
+                        "params": {"threadId": "thread-race", "turn": {"id": "prior", "status": "completed"}},
+                    }
+                ]
+                ov_proc = _run_drive(
+                    [
+                        "attach",
+                        "--cwd",
+                        str(repo),
+                        "--mode",
+                        "scout",
+                        "--model",
+                        "gpt-6.2-astra",
+                        "--timeout",
+                        "2",
+                        "--prompt",
+                        "run after pending turn/completed",
+                    ],
+                    env=env,
+                )
+                self.assertEqual(ov_proc.returncode, drive.EXIT_OK, ov_proc.stdout + ov_proc.stderr)
+                self.assertEqual(json.loads(ov_proc.stdout)["final_message"], "override turn ok")
+
+                srv.replay_on_resume = []
+                srv.threads["thread-race"]["status"] = {"type": "idle"}
+                scenario["mode"] = "simultaneous_enter"
+                sim_proc = _run_drive(
+                    [
+                        "attach",
+                        "--cwd",
+                        str(repo),
+                        "--mode",
+                        "scout",
+                        "--timeout",
+                        "2",
+                        "--prompt",
+                        "race against human enter",
+                    ],
+                    env=env,
+                )
+                self.assertEqual(sim_proc.returncode, drive.EXIT_OK, sim_proc.stdout + sim_proc.stderr)
+                sim_data = json.loads(sim_proc.stdout)
+                self.assertEqual(sim_data["final_message"], "AGENT_TURN_TEXT")
+            finally:
+                srv.close()
 
 
 if __name__ == "__main__":

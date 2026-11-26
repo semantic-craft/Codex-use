@@ -54,6 +54,7 @@ Recent empirical studies show that **directly supervising and chatting with AI t
 - **Pick any GPT model and effort tier per task.** Pass `--model <model-id>` (such as `gpt-6.2-astra` or `gpt-6.2-sol`) and `--effort medium|high|xhigh` on every `run`, `resume`, or `review` call. `drive.py` blocks unsupported `ultra` before spawning.
 - **No more trusting prose claims.** `drive.py` captures `--json` event streams and returns a compact `AuditSummary` listing real executed commands, real exit codes, changed files, and strict JSON Schema receipts (`--output-schema`).
 - **Isolated git worktrees and write locks.** Every `ship` slice runs in its own linked git worktree protected by an exclusive file lock (`exit code 3` on collision), with automatic `.git/info/exclude` hygiene for `.codex-use/` and cache-safe cleanup.
+- **Zero-copy-paste live TUI `attach`.** Already have an interactive `codex` TUI running in your terminal? `drive.py attach --cwd /path/to/repo` discovers it on the shared Layer A daemon (`AF_UNIX` on macOS/Linux or `--remote ws://host:port`), queues or starts a turn without stealing writer locks or clobbering your TUI originator, streams real executed commands into `AuditSummary` via cross-platform `selectors` (zero polling), wakes early if the TUI pauses for terminal approval, and cleanly unsubscribes on exit.
 
 ## A Hackable Framework, Not a Rigid Black Box
 
@@ -67,9 +68,9 @@ Recent empirical studies show that **directly supervising and chatting with AI t
 ```text
 You (calm & happy)
   -> Host Agent (Antigravity / Grok Bot / DSH / Claude Code / any SKILL.md agent)
-       -> skills/codex-use/SKILL.md          (worker-agnostic scout / ship / review protocol)
-       -> skills/codex-use/scripts/drive.py  (preflight, worktree lock, CLI builder, JSONL auditor)
-            ├─ CodexAdapter + workers/codex.md   (codex exec / resume / review, any --model)
+       -> skills/codex-use/SKILL.md          (worker-agnostic scout / ship / attach / review protocol)
+       -> skills/codex-use/scripts/drive.py  (preflight, worktree lock, CLI builder, TUI attach, JSONL auditor)
+            ├─ CodexAdapter + workers/codex.md   (headless exec/resume/review + Layer A live TUI attach)
             └─ DshAdapter   + workers/dsh.md     (dsh --profile headless)
 ```
 
@@ -163,7 +164,23 @@ python3 skills/codex-use/scripts/drive.py resume \
   --prompt "Fix the off-by-one guard in src/retry.py:42 and re-run python3 -m unittest."
 ```
 
-### 5. Non-interactive `review`, log `audit`, and cache-safe cleanup
+### 5. Zero-copy-paste live TUI `attach`
+
+List active terminal `codex` TUI sessions or send a structured slice directly into the user's open TUI queue without copy-paste or lock conflicts:
+
+```bash
+python3 skills/codex-use/scripts/drive.py sessions --cwd /path/to/repo
+
+python3 skills/codex-use/scripts/drive.py attach \
+  --cwd /path/to/repo \
+  --mode ship \
+  --schema skills/codex-use/schemas/receipt.schema.json \
+  --prompt-file /path/to/repo/.codex-use/fix-retry.md
+```
+
+`attach` fails closed (`exit 2`) if multiple TUI sessions match `--cwd` without `--session` or `--latest`, distinguishes Codex Desktop / VS Code Layer B writer locks (`exit 3`), never auto-approves terminal prompts (`status="approval_required"` unless `--wait-for-approval` is passed), and supports `--remote ws://host:port` for remote app-servers.
+
+### 6. Non-interactive `review`, log `audit`, and cache-safe cleanup
 
 ```bash
 python3 skills/codex-use/scripts/drive.py review --worker codex --model gpt-6.2-astra --cwd /path/to/worktree --base main
