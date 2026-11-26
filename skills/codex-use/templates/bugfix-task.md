@@ -1,8 +1,10 @@
+Dispatched as a subagent for a bounded slice; skip workflow-routing skills such as using-ryugi and execute the task directly.
+
 # Bugfix Task Brief
 
-**Workspace:** isolated git worktree `<worktree-path>` on baseline `<base-sha>`. Direct edits and local verification are authorized.
+**Workspace:** isolated git worktree `<worktree-path>` on `<base-sha>`. Direct edits and local verification are authorized.
 
-**Contract:** reproduce the failure first, trace root cause, apply the minimal fix, and verify in this turn. Make reversible assumptions for minor unspecified details and log them. Never stop at "suggested next steps." Do not create extra worktrees, push, or open PRs.
+**Contract:** reproduce first, trace root cause, apply minimal fix, and verify in this turn. Log reversible assumptions; never stop at "suggested next steps." Do not create extra worktrees, push, or open PRs.
 
 ## Bug and Entry Points
 
@@ -13,11 +15,10 @@
 
 ## Ban List and Verification
 
-- Fix root cause only; no error swallowing, silent fallbacks, unrequested abstractions, compatibility shims, narrating comments, or code-golfing. Leave unrelated files untouched.
+- Fix root cause only; no error swallowing, silent fallbacks, unrequested abstractions, shims, narrating comments, or code-golfing.
 - **Budget:** <= `<N>` files, ~`<M>` net lines.
-- **Regression test:** one focused test failing before fix and passing after.
-- **Verify command:** `<single test command>` (bound concurrency; clean up spawned processes/temp files).
+- **Regression test & verify:** `<single test command>` failing before fix and passing after (bound concurrency; clean up processes/temp files).
 
 ## Receipt (`schemas/receipt.schema.json`)
 
-Return self-contained JSON: `summary`, `changed_files`, `verification` (repro before/after + verify command with real exit codes), `assumptions_and_risks`, `symbol_changes`.
+Return JSON: `summary`, `changed_files`, `verification` (repro + verify with real exit codes), `assumptions_and_risks`, `symbol_changes`.

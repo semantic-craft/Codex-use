@@ -2,69 +2,26 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://codex-use.dev/schemas/receipt.schema.json",
   "title": "Codex-use Completion Receipt",
-  "description": "Structured four-item completion receipt returned by headless worker runs.",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "summary",
-    "changed_files",
-    "verification",
-    "assumptions_and_risks",
-    "symbol_changes"
-  ],
+  "required": ["summary", "changed_files", "verification", "assumptions_and_risks", "symbol_changes"],
   "properties": {
-    "summary": {
-      "type": "string",
-      "description": "Self-contained plain-language summary written for a reader seeing the outcome for the first time."
-    },
-    "changed_files": {
-      "type": "array",
-      "description": "Repository-relative paths created, modified, or deleted during the slice (empty for scout mode).",
-      "items": {
-        "type": "string",
-        "minLength": 1
-      }
-    },
+    "summary": { "type": "string" },
+    "changed_files": { "type": "array", "items": { "type": "string", "minLength": 1 } },
     "verification": {
       "type": "array",
-      "description": "Commands actually executed during this run with their observed exit codes and concise outcome notes.",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "command",
-          "exit_code",
-          "summary"
-        ],
+        "required": ["command", "exit_code", "summary"],
         "properties": {
-          "command": {
-            "type": "string",
-            "minLength": 1
-          },
-          "exit_code": {
-            "type": "integer"
-          },
-          "summary": {
-            "type": "string"
-          }
+          "command": { "type": "string", "minLength": 1 },
+          "exit_code": { "type": "integer" },
+          "summary": { "type": "string" }
         }
       }
     },
-    "assumptions_and_risks": {
-      "type": "array",
-      "description": "Reversible assumptions made during execution plus remaining risks, open tradeoffs, or uncovered boundaries.",
-      "items": {
-        "type": "string",
-        "minLength": 1
-      }
-    },
-    "symbol_changes": {
-      "type": "array",
-      "description": "Key public or structural symbols added, modified, or removed.",
-      "items": {
-        "type": "string",
-        "minLength": 1
-      }
-    }
+    "assumptions_and_risks": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "symbol_changes": { "type": "array", "items": { "type": "string", "minLength": 1 } }
   }
 }

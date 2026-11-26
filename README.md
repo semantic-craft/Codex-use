@@ -51,10 +51,10 @@ Recent empirical studies show that **directly supervising and chatting with AI t
 ## What Changes When You Use `Codex-use`
 
 - **Better mood, zero direct Codex wrangling.** Talk normally to the host agent you actually enjoy using. It writes structured briefs from built-in templates, handles up to 2 automatic `auto-fix` resume rounds, and reports back in clear human prose.
-- **Pick any GPT model and effort tier per task.** Pass `--model <model-id>` (such as `gpt-6.2-astra` or `gpt-6.2-sol`) and `--effort medium|high|xhigh` on every `run`, `resume`, or `review` call. `drive.py` blocks unsupported `ultra` before spawning.
+- **Pick any GPT model, effort tier, and `--fast` speed per task.** Pass `--model <model-id>` (such as `gpt-6.2-astra` or `gpt-6.2-sol`), `--effort medium|high|xhigh`, and optional `--fast` (`service_tier="priority"`) on `run`, `resume`, or `attach`. `drive.py` blocks unsupported `ultra` and `ultrafast` before spawning, isolates headless `codex exec` runs from slow desktop MCP boots by default (`-c mcp_servers={}`, opt back in via `--with-mcp`), and prepends a 1-line subagent preamble skipping workflow-routing skills unless `--raw-prompt` is passed.
 - **No more trusting prose claims.** `drive.py` captures `--json` event streams and returns a compact `AuditSummary` listing real executed commands, real exit codes, changed files, and strict JSON Schema receipts (`--output-schema`).
 - **Isolated git worktrees and write locks.** Every `ship` slice runs in its own linked git worktree protected by an exclusive file lock (`exit code 3` on collision), with automatic `.git/info/exclude` hygiene for `.codex-use/` and cache-safe cleanup.
-- **Zero-copy-paste live TUI `attach`.** Already have an interactive `codex` TUI running in your terminal? `drive.py attach --cwd /path/to/repo` discovers it on the shared Layer A daemon (`AF_UNIX` on macOS/Linux or `--remote ws://host:port`), queues or starts a turn without stealing writer locks or clobbering your TUI originator, streams real executed commands into `AuditSummary` via cross-platform `selectors` (zero polling), wakes early if the TUI pauses for terminal approval, and cleanly unsubscribes on exit.
+- **Zero-setup warm Layer A daemon dispatch (`run --daemon`) & live TUI `attach [--create]`.** Run `drive.py run --worker codex --daemon ...` to auto-start the local Layer A app-server daemon (`codex app-server daemon start`), execute the slice without `codex exec` cold-boot overhead, and auto-archive ephemeral threads on exit (or keep them loaded with `--keep-loaded`). Already have an interactive `codex` TUI running, or want to spin up a persistent warm thread for multi-turn reuse? `drive.py attach --cwd /path/to/repo [--create]` pairs over `AF_UNIX` or `--remote ws://host:port` using pipelined JSON-RPC without stealing writer locks, recovers 0-turn empty-rollout threads automatically, wakes early if a TUI pauses for terminal approval, and cleanly unsubscribes on exit.
 
 ## A Hackable Framework, Not a Rigid Black Box
 
@@ -128,6 +128,8 @@ python3 skills/codex-use/scripts/drive.py preflight --worker dsh --cwd /path/to/
 ```bash
 python3 skills/codex-use/scripts/drive.py run \
   --worker codex \
+  --daemon \
+  --fast \
   --model gpt-6.2-astra \
   --mode scout \
   --effort medium \
@@ -164,21 +166,23 @@ python3 skills/codex-use/scripts/drive.py resume \
   --prompt "Fix the off-by-one guard in src/retry.py:42 and re-run python3 -m unittest."
 ```
 
-### 5. Zero-copy-paste live TUI `attach`
+### 5. Zero-setup live TUI `attach` and `--create`
 
-List active terminal `codex` TUI sessions or send a structured slice directly into the user's open TUI queue without copy-paste or lock conflicts:
+List active terminal `codex` TUI sessions (pass `--ensure-daemon` to auto-start the local daemon), send a structured slice into an open TUI queue, or pass `--create` to boot a warm daemon thread when none is loaded yet:
 
 ```bash
-python3 skills/codex-use/scripts/drive.py sessions --cwd /path/to/repo
+python3 skills/codex-use/scripts/drive.py sessions --cwd /path/to/repo --ensure-daemon
 
 python3 skills/codex-use/scripts/drive.py attach \
   --cwd /path/to/repo \
+  --create \
+  --fast \
   --mode ship \
   --schema skills/codex-use/schemas/receipt.schema.json \
   --prompt-file /path/to/repo/.codex-use/fix-retry.md
 ```
 
-`attach` fails closed (`exit 2`) if multiple TUI sessions match `--cwd` without `--session` or `--latest`, distinguishes Codex Desktop / VS Code Layer B writer locks (`exit 3`), never auto-approves terminal prompts (`status="approval_required"` unless `--wait-for-approval` is passed), and supports `--remote ws://host:port` for remote app-servers.
+`attach` fails closed (`exit 2`) if multiple TUI sessions match `--cwd` without `--session` or `--latest`, distinguishes Codex Desktop / VS Code Layer B writer locks (`exit 3`), never auto-approves terminal prompts (`status="approval_required"` unless `--wait-for-approval` is passed), leaves `--create` threads warm in the daemon for high cache-hit reuse (`attach --cwd` or `codex resume <session_id>`), and supports `--remote ws://host:port` for remote app-servers.
 
 ### 6. Non-interactive `review`, log `audit`, and cache-safe cleanup
 

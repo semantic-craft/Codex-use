@@ -7,6 +7,7 @@ from collections import deque
 import contextlib
 import dataclasses
 from dataclasses import dataclass, field
+import functools
 try:
     import fcntl
 except ImportError:  # pragma: no cover
@@ -89,6 +90,12 @@ USER_INPUT_REQUEST_METHODS: frozenset[str] = frozenset(
 )
 
 CODEX_ALLOWED_EFFORTS: frozenset[str] = frozenset({"medium", "high", "xhigh"})
+CODEX_FORBIDDEN_EFFORTS: frozenset[str] = frozenset({"ultra", "ultrafast"})
+CODEX_ALLOWED_SERVICE_TIERS: frozenset[str] = frozenset({"default", "priority", "flex"})
+SUBAGENT_DISPATCH_PREAMBLE = (
+    "Dispatched as a subagent for a bounded slice; "
+    "skip workflow-routing skills such as using-ryugi and execute the task directly."
+)
 DSH_PERMISSION_MODES: frozenset[str] = frozenset(
     {"read-only", "workspace-write", "danger-full-access"}
 )
@@ -235,6 +242,7 @@ class DaemonEndpoint:
     ws_path: str = "/rpc"
     port: int | None = None
     bearer_token: str | None = None
+    is_custom_remote: bool = False
 
     def display(self) -> str:
         if self.transport == "unix":
@@ -310,8 +318,10 @@ class AttachRequest:
     cwd: Path | None
     session_id: str | None = None
     select_latest: bool = False
+    create: bool = False
     effort: str | None = None
     model: str | None = None
+    fast: bool = False
     schema_path: Path | None = None
     output_last_message: Path | None = None
     images: tuple[Path, ...] = ()
@@ -328,6 +338,8 @@ class RunRequest:
     cwd: Path
     effort: str | None = None
     model: str | None = None
+    fast: bool = False
+    with_mcp: bool = False
     permission_mode: str | None = None
     approval_policy: str | None = None
     allow_danger: bool = False
@@ -345,6 +357,8 @@ class ResumeRequest:
     cwd: Path
     effort: str | None = None
     model: str | None = None
+    fast: bool = False
+    with_mcp: bool = False
     permission_mode: str | None = None
     approval_policy: str | None = None
     allow_danger: bool = False
@@ -373,6 +387,7 @@ class GitContext:
     git_dir: Path | None
     git_common_dir: Path | None
     is_linked_worktree: bool
+    head_sha: str | None = None
 
 
 class WorkerAdapter(Protocol):
@@ -421,26 +436,52 @@ def _run_git(cwd: Path, args: list[str], timeout: float = 10.0) -> subprocess.Co
         return subprocess.CompletedProcess(args=cmd, returncode=127, stdout="", stderr=str(exc))
 
 
+def _resolve_git_path(cwd: Path, raw: str) -> Path:
+    p = Path(raw.strip())
+    if not p.is_absolute():
+        p = cwd / p
+    return p.resolve()
+
+
+@functools.lru_cache(maxsize=256)
+def _inspect_git_context_cached(resolved_cwd_str: str) -> GitContext:
+    cwd = Path(resolved_cwd_str)
+    res = _run_git(cwd, ["rev-parse", "--show-toplevel", "--git-dir", "--git-common-dir", "HEAD"])
+    lines = [line.strip() for line in res.stdout.splitlines() if line.strip()]
+    head_sha: str | None = None
+    if res.returncode == 0 and len(lines) >= 3:
+        git_root = Path(lines[0]).resolve()
+        git_dir = _resolve_git_path(cwd, lines[1])
+        git_common_dir = _resolve_git_path(cwd, lines[2])
+        if len(lines) >= 4:
+            head_sha = lines[3]
+        is_linked = git_dir != git_common_dir
+        return GitContext(True, git_root, git_dir, git_common_dir, is_linked, head_sha)
+
+    stderr_lower = (res.stderr or "").lower()
+    if "not a git repository" not in stderr_lower and (
+        "head" in stderr_lower or "unknown revision" in stderr_lower
+    ):
+        fallback = _run_git(cwd, ["rev-parse", "--show-toplevel", "--git-dir", "--git-common-dir"])
+        fb_lines = [line.strip() for line in fallback.stdout.splitlines() if line.strip()]
+        if fallback.returncode == 0 and len(fb_lines) >= 3:
+            git_root = Path(fb_lines[0]).resolve()
+            git_dir = _resolve_git_path(cwd, fb_lines[1])
+            git_common_dir = _resolve_git_path(cwd, fb_lines[2])
+            is_linked = git_dir != git_common_dir
+            return GitContext(True, git_root, git_dir, git_common_dir, is_linked, None)
+
+    return GitContext(False, None, None, None, False, None)
+
+
+def clear_git_context_cache() -> None:
+    _inspect_git_context_cached.cache_clear()
+
+
 def inspect_git_context(cwd: Path) -> GitContext:
     if not cwd.exists():
-        return GitContext(False, None, None, None, False)
-    top = _run_git(cwd, ["rev-parse", "--show-toplevel"])
-    if top.returncode != 0:
-        return GitContext(False, None, None, None, False)
-    git_root = Path(top.stdout.strip()).resolve()
-    gd_res = _run_git(cwd, ["rev-parse", "--git-dir"])
-    gcd_res = _run_git(cwd, ["rev-parse", "--git-common-dir"])
-
-    def _resolve_git_path(raw: str) -> Path:
-        p = Path(raw.strip())
-        if not p.is_absolute():
-            p = cwd / p
-        return p.resolve()
-
-    git_dir = _resolve_git_path(gd_res.stdout) if gd_res.returncode == 0 else None
-    git_common_dir = _resolve_git_path(gcd_res.stdout) if gcd_res.returncode == 0 else None
-    is_linked = bool(git_dir and git_common_dir and git_dir != git_common_dir)
-    return GitContext(True, git_root, git_dir, git_common_dir, is_linked)
+        return GitContext(False, None, None, None, False, None)
+    return _inspect_git_context_cached(str(cwd.resolve()))
 
 
 def resolve_worktree_git_common_dir(cwd: Path) -> Path | None:
@@ -688,13 +729,35 @@ def _validate_receipt_shape(data: dict[str, Any]) -> bool:
 
 
 def _validate_codex_effort(effort: str) -> CodexEffort:
-    if effort not in CODEX_ALLOWED_EFFORTS:
+    normalized = effort.strip().lower()
+    if normalized in CODEX_FORBIDDEN_EFFORTS or effort not in CODEX_ALLOWED_EFFORTS:
         raise ValidationError(
             f"Unsupported Codex reasoning effort {effort!r}. "
             f"Allowed values: {', '.join(sorted(CODEX_ALLOWED_EFFORTS))}. "
-            "'ultra' is explicitly forbidden."
+            "'ultra' and 'ultrafast' are explicitly forbidden."
         )
     return effort  # type: ignore[return-value]
+
+
+def _validate_codex_service_tier(service_tier: str | None) -> str | None:
+    if service_tier is None:
+        return None
+    normalized = service_tier.strip().lower()
+    if normalized in CODEX_FORBIDDEN_EFFORTS or service_tier not in CODEX_ALLOWED_SERVICE_TIERS:
+        raise ValidationError(
+            f"Unsupported Codex service tier {service_tier!r}. "
+            f"Allowed values: {', '.join(sorted(CODEX_ALLOWED_SERVICE_TIERS))}. "
+            "'ultra' and 'ultrafast' are explicitly forbidden."
+        )
+    return service_tier
+
+
+def _apply_prompt_preamble(prompt: str, raw_prompt: bool = False) -> str:
+    if raw_prompt:
+        return prompt
+    if "using-ryugi" in prompt or "Dispatched as a subagent" in prompt:
+        return prompt
+    return f"{SUBAGENT_DISPATCH_PREAMBLE}\n\n{prompt}"
 
 
 def _resolve_codex_binary(standalone_path: Path | None = None) -> tuple[str | None, str]:
@@ -782,8 +845,12 @@ class CodexAdapter:
             str(req.cwd),
             "-c",
             f'model_reasoning_effort="{effort}"',
-            "--json",
         ]
+        if not req.with_mcp:
+            cmd.extend(["-c", "mcp_servers={}"])
+        if req.fast:
+            cmd.extend(["-c", 'service_tier="priority"'])
+        cmd.append("--json")
         if req.output_last_message is not None:
             cmd.extend(["-o", str(req.output_last_message)])
         if req.schema_path is not None:
@@ -809,6 +876,10 @@ class CodexAdapter:
             cmd.extend(["--output-schema", str(req.schema_path)])
         if effort is not None:
             cmd.extend(["-c", f'model_reasoning_effort="{effort}"'])
+        if not req.with_mcp:
+            cmd.extend(["-c", "mcp_servers={}"])
+        if req.fast:
+            cmd.extend(["-c", 'service_tier="priority"'])
         if req.model:
             cmd.extend(["-m", req.model])
         for img in req.images:
@@ -1113,6 +1184,16 @@ class DshAdapter:
                 "dsh --profile headless does not support --image attachments. "
                 "Remove --image or use --worker codex."
             )
+        if req.fast:
+            raise ValidationError(
+                'dsh --profile headless does not support --fast (service_tier="priority"). '
+                "Remove --fast or use --worker codex."
+            )
+        if req.with_mcp:
+            raise ValidationError(
+                "dsh --profile headless does not support --with-mcp. "
+                "Remove --with-mcp or use --worker codex."
+            )
         perm, policy = _resolve_dsh_permissions(
             req.mode, req.permission_mode, req.approval_policy, req.allow_danger
         )
@@ -1137,6 +1218,16 @@ class DshAdapter:
             raise ValidationError(
                 "dsh --profile headless does not support --image attachments. "
                 "Remove --image or use --worker codex."
+            )
+        if req.fast:
+            raise ValidationError(
+                'dsh --profile headless does not support --fast (service_tier="priority"). '
+                "Remove --fast or use --worker codex."
+            )
+        if req.with_mcp:
+            raise ValidationError(
+                "dsh --profile headless does not support --with-mcp. "
+                "Remove --with-mcp or use --worker codex."
             )
         perm, policy = _resolve_dsh_permissions(
             req.mode, req.permission_mode, req.approval_policy, req.allow_danger
@@ -1464,6 +1555,7 @@ def create_worktree(
         raise DriverRuntimeError(
             f"git worktree add failed: {(add_res.stderr or add_res.stdout).strip()}"
         )
+    clear_git_context_cache()
     ensure_local_git_exclude(repo_root)
     lock_file = resolve_ship_lock_path(target_dir)
     return {
@@ -1583,7 +1675,7 @@ def remove_worktree(
             raise DriverRuntimeError(
                 f"git worktree remove failed: {(rem_res.stderr or rem_res.stdout).strip()}"
             )
-
+    clear_git_context_cache()
     _prune_empty_worktree_parents(wt_resolved)
 
     branch_deleted = False
@@ -1779,6 +1871,7 @@ def resolve_daemon_endpoint(
             host_header="localhost",
             ws_path="/rpc",
             bearer_token=bearer_token,
+            is_custom_remote=False,
         )
 
     if remote.startswith("unix://"):
@@ -1793,6 +1886,7 @@ def resolve_daemon_endpoint(
             host_header="localhost",
             ws_path="/rpc",
             bearer_token=bearer_token,
+            is_custom_remote=True,
         )
 
     parsed = urllib.parse.urlsplit(remote)
@@ -1818,7 +1912,76 @@ def resolve_daemon_endpoint(
         ws_path=ws_path,
         port=resolved_port,
         bearer_token=bearer_token,
+        is_custom_remote=True,
     )
+
+
+def _is_default_local_daemon_endpoint(
+    endpoint: DaemonEndpoint, codex_home: Path | None = None
+) -> bool:
+    if endpoint.transport != "unix" or endpoint.is_custom_remote:
+        return False
+    home = codex_home if codex_home is not None else _resolve_codex_home()
+    default_sock = home / "app-server-control" / "app-server-control.sock"
+    return Path(endpoint.address) == default_sock
+
+
+def _ensure_local_daemon_running(
+    endpoint: DaemonEndpoint, codex_home: Path | None = None
+) -> bool:
+    if not _is_default_local_daemon_endpoint(endpoint, codex_home=codex_home):
+        return False
+    binary, _ = _resolve_codex_binary()
+    if not binary:
+        return False
+    env: dict[str, str] | None = None
+    if codex_home is not None and os.environ.get("CODEX_HOME") != str(codex_home):
+        env = os.environ.copy()
+        env["CODEX_HOME"] = str(codex_home)
+    try:
+        res = subprocess.run(
+            [binary, "app-server", "daemon", "start"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5.0,
+            env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return res.returncode == 0
+
+
+def _connect_daemon_rpc(
+    endpoint: DaemonEndpoint,
+    connect_timeout: float,
+    auto_start: bool,
+    remote: str | None = None,
+    remote_auth_token_env: str | None = None,
+    codex_home: Path | None = None,
+) -> tuple[AppServerRpcClient, DaemonEndpoint]:
+    try:
+        return AppServerRpcClient(endpoint, connect_timeout=connect_timeout), endpoint
+    except DaemonOfflineError:
+        if not auto_start or not _ensure_local_daemon_running(endpoint, codex_home=codex_home):
+            raise
+    resolved = resolve_daemon_endpoint(
+        remote=remote,
+        remote_auth_token_env=remote_auth_token_env,
+        codex_home=codex_home,
+    )
+    if resolved.transport == "unix" and not Path(resolved.address).exists():
+        wait_until = time.monotonic() + 0.25
+        while time.monotonic() < wait_until:
+            time.sleep(0.02)
+            resolved = resolve_daemon_endpoint(
+                remote=remote,
+                remote_auth_token_env=remote_auth_token_env,
+                codex_home=codex_home,
+            )
+            if Path(resolved.address).exists():
+                break
+    return AppServerRpcClient(resolved, connect_timeout=connect_timeout), resolved
 
 
 class Rfc6455Client:
@@ -1986,7 +2149,7 @@ class Rfc6455Client:
             except OSError as exc:
                 raise WebSocketClosedError(f"WebSocket read failed: {exc}") from exc
 
-    def send_frame(self, opcode: int, payload: bytes, deadline: float) -> None:
+    def _encode_frame(self, opcode: int, payload: bytes) -> bytes:
         length = len(payload)
         if opcode == 0x1 and length > self.max_outbound_frame_bytes:
             raise ValidationError(
@@ -2001,7 +2164,18 @@ class Rfc6455Client:
         else:
             header = bytes([first_byte, 0x80 | 127]) + struct.pack(">Q", length)
         masked_payload = _xor_mask(payload, mask)
-        self._write_all(header + mask + masked_payload, deadline)
+        return header + mask + masked_payload
+
+    def send_frame(self, opcode: int, payload: bytes, deadline: float) -> None:
+        self._write_all(self._encode_frame(opcode, payload), deadline)
+
+    def send_frames(self, frames: list[tuple[int, bytes]], deadline: float) -> None:
+        if not frames:
+            return
+        combined = bytearray()
+        for opcode, payload in frames:
+            combined.extend(self._encode_frame(opcode, payload))
+        self._write_all(bytes(combined), deadline)
 
     def _try_extract_frame(self) -> tuple[bool, int, bytes] | None:
         buf_len = len(self._rx_buf)
@@ -2121,18 +2295,32 @@ class AppServerRpcClient:
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.ws.send_frame(0x1, raw, deadline)
 
-    def request(self, method: str, params: dict[str, Any] | None, deadline: float) -> dict[str, Any]:
-        req_id = self._next_id
-        self._next_id += 1
-        payload: dict[str, Any] = {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "method": method,
-            "params": params if params is not None else {},
-        }
-        raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.ws.send_frame(0x1, raw, deadline)
-        while True:
+    def request_batch(
+        self,
+        calls: list[tuple[str, dict[str, Any]]],
+        deadline: float,
+    ) -> list[dict[str, Any] | JsonRpcError]:
+        if not calls:
+            return []
+        id_to_slot: dict[int, tuple[int, str]] = {}
+        outbound_frames: list[tuple[int, bytes]] = []
+        for idx, (method, params) in enumerate(calls):
+            req_id = self._next_id
+            self._next_id += 1
+            id_to_slot[req_id] = (idx, method)
+            payload: dict[str, Any] = {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "method": method,
+                "params": params if params is not None else {},
+            }
+            raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            outbound_frames.append((0x1, raw))
+        self.ws.send_frames(outbound_frames, deadline)
+
+        results: list[dict[str, Any] | JsonRpcError | None] = [None] * len(calls)
+        remaining = len(calls)
+        while remaining > 0:
             text = self.ws.recv_text(deadline)
             try:
                 msg = json.loads(text)
@@ -2140,7 +2328,15 @@ class AppServerRpcClient:
                 continue
             if not isinstance(msg, dict):
                 continue
-            if msg.get("id") == req_id and "method" not in msg and ("result" in msg or "error" in msg):
+            msg_id = msg.get("id")
+            if (
+                isinstance(msg_id, int)
+                and not isinstance(msg_id, bool)
+                and msg_id in id_to_slot
+                and "method" not in msg
+                and ("result" in msg or "error" in msg)
+            ):
+                idx, method = id_to_slot.pop(msg_id)
                 if "error" in msg:
                     err_obj = msg.get("error")
                     code = err_obj.get("code") if isinstance(err_obj, dict) else None
@@ -2150,11 +2346,26 @@ class AppServerRpcClient:
                         else str(err_obj)
                     )
                     err_data = err_obj.get("data") if isinstance(err_obj, dict) else None
-                    raise JsonRpcError(method, code if isinstance(code, int) else None, err_msg, err_data)
-                res = msg.get("result")
-                return res if isinstance(res, dict) else {"value": res}
-            self._record(msg)
-            self._pending.append(msg)
+                    results[idx] = JsonRpcError(
+                        method, code if isinstance(code, int) else None, err_msg, err_data
+                    )
+                else:
+                    res = msg.get("result")
+                    results[idx] = res if isinstance(res, dict) else {"value": res}
+                remaining -= 1
+            else:
+                self._record(msg)
+                self._pending.append(msg)
+        return [r for r in results if r is not None]
+
+    def request(self, method: str, params: dict[str, Any] | None, deadline: float) -> dict[str, Any]:
+        outcome = self.request_batch(
+            [(method, params if params is not None else {})],
+            deadline=deadline,
+        )[0]
+        if isinstance(outcome, JsonRpcError):
+            raise outcome
+        return outcome
 
     def initialize(self, deadline: float) -> dict[str, Any]:
         res = self.request(
@@ -2208,6 +2419,14 @@ class AppServerRpcClient:
         with contextlib.suppress(Exception):
             self.request(
                 "thread/unsubscribe",
+                {"threadId": thread_id},
+                deadline=time.monotonic() + 2.0,
+            )
+
+    def archive_quietly(self, thread_id: str) -> None:
+        with contextlib.suppress(Exception):
+            self.request(
+                "thread/archive",
                 {"threadId": thread_id},
                 deadline=time.monotonic() + 2.0,
             )
@@ -2438,9 +2657,9 @@ def _find_conflicting_writer_locks(
     return matched_ids
 
 
-def _list_daemon_loaded_threads(
+def _list_daemon_loaded_thread_ids(
     rpc: AppServerRpcClient, deadline: float
-) -> tuple[set[str], list[LoadedTuiThread]]:
+) -> list[str]:
     loaded_ids: list[str] = []
     seen_ids: set[str] = set()
     cursor: str | None = None
@@ -2461,16 +2680,22 @@ def _list_daemon_loaded_threads(
         if not isinstance(next_cursor, str) or not next_cursor:
             break
         cursor = next_cursor
+    return loaded_ids
+
+
+def _list_daemon_loaded_threads(
+    rpc: AppServerRpcClient, deadline: float
+) -> tuple[set[str], list[LoadedTuiThread]]:
+    loaded_ids = _list_daemon_loaded_thread_ids(rpc, deadline)
+    seen_ids = set(loaded_ids)
+    read_calls = [
+        ("thread/read", {"threadId": tid, "includeTurns": False}) for tid in loaded_ids
+    ]
+    read_results = rpc.request_batch(read_calls, deadline=deadline)
 
     threads: list[LoadedTuiThread] = []
-    for tid in loaded_ids:
-        try:
-            read_res = rpc.request(
-                "thread/read",
-                {"threadId": tid, "includeTurns": False},
-                deadline=deadline,
-            )
-        except JsonRpcError:
+    for read_res in read_results:
+        if isinstance(read_res, JsonRpcError):
             continue
         th_obj = read_res.get("thread") if isinstance(read_res.get("thread"), dict) else read_res
         if not isinstance(th_obj, dict) or _is_subagent_or_ephemeral_thread(th_obj):
@@ -2491,12 +2716,10 @@ def _resolve_thread_with_client(
     select_latest: bool,
     deadline: float,
 ) -> ThreadResolution:
-    loaded_id_set, loaded_threads = _list_daemon_loaded_threads(rpc, deadline)
-    by_id = {t.thread_id: t for t in loaded_threads}
-
     if session_id:
-        matched_thread = by_id.get(session_id)
-        if matched_thread is None and session_id in loaded_id_set:
+        loaded_id_set = set(_list_daemon_loaded_thread_ids(rpc, deadline))
+        matched_thread: LoadedTuiThread | None = None
+        if session_id in loaded_id_set:
             with contextlib.suppress(JsonRpcError):
                 read_res = rpc.request(
                     "thread/read",
@@ -2538,6 +2761,8 @@ def _resolve_thread_with_client(
             endpoint=endpoint.display(),
             detail=f"Session {session_id} is not loaded on the Codex Layer A daemon.",
         )
+
+    loaded_id_set, loaded_threads = _list_daemon_loaded_threads(rpc, deadline)
 
     assert target_cwd is not None
     target_resolved = target_cwd.resolve()
@@ -2720,6 +2945,84 @@ def _harvest_completed_turn_from_read(
     return outcome, harvested_turn_id, commands, changed_files, errors, final_message
 
 
+def _is_unmaterialized_rollout_error(exc: JsonRpcError) -> bool:
+    lowered = exc.rpc_message.lower()
+    return "no rollout found" in lowered or ("rollout" in lowered and "is empty" in lowered)
+
+
+def _build_thread_start_params(
+    cwd: Path,
+    mode: WriteMode,
+    model: str | None = None,
+    effort: str | None = None,
+    fast: bool = False,
+    with_mcp: bool = True,
+    approval_policy: str | None = "never",
+) -> dict[str, Any]:
+    sandbox = "read-only" if mode == "scout" else "workspace-write"
+    params: dict[str, Any] = {
+        "cwd": str(cwd),
+        "sandbox": sandbox,
+    }
+    if approval_policy is not None:
+        params["approvalPolicy"] = approval_policy
+    if model is not None:
+        params["model"] = model
+    if fast:
+        params["serviceTier"] = _validate_codex_service_tier("priority")
+    config: dict[str, Any] = {}
+    if effort is not None:
+        config["model_reasoning_effort"] = effort
+    if not with_mcp:
+        config["mcp_servers"] = {}
+    if config:
+        params["config"] = config
+    return params
+
+
+def _synthesize_started_thread(
+    start_res: dict[str, Any],
+    fallback_cwd: Path,
+    model: str | None = None,
+) -> LoadedTuiThread:
+    th_obj = start_res.get("thread") if isinstance(start_res.get("thread"), dict) else start_res
+    resolved_model = (
+        start_res.get("model")
+        if isinstance(start_res.get("model"), str) and start_res.get("model")
+        else model
+    )
+    if isinstance(th_obj, dict):
+        parsed = _parse_loaded_tui_thread(th_obj)
+        if parsed is not None:
+            if parsed.model is None and resolved_model is not None:
+                return dataclasses.replace(parsed, model=resolved_model)
+            return parsed
+        tid = th_obj.get("id")
+    else:
+        tid = None
+    if not isinstance(tid, str) or not tid:
+        raw_tid = start_res.get("threadId")
+        tid = raw_tid if isinstance(raw_tid, str) and raw_tid else None
+    if not tid:
+        raise DriverRuntimeError("thread/start did not return a valid thread id.")
+    resolved_cwd_path = fallback_cwd.resolve()
+    git_ctx = inspect_git_context(resolved_cwd_path)
+    return LoadedTuiThread(
+        thread_id=tid,
+        title="",
+        cwd=str(resolved_cwd_path),
+        resolved_cwd=str(resolved_cwd_path),
+        git_root=str(git_ctx.git_root) if git_ctx.is_git_repo and git_ctx.git_root else None,
+        status="idle",
+        active_flags=(),
+        model=resolved_model,
+        originator=NON_ORIGINATING_CLIENT_NAME,
+        source="appServer",
+        updated_at=int(time.time()),
+        created_at=int(time.time()),
+    )
+
+
 def _dispatch_and_observe_turn(
     rpc: AppServerRpcClient,
     thread: LoadedTuiThread,
@@ -2729,6 +3032,8 @@ def _dispatch_and_observe_turn(
     preview_limit: int,
     deadline: float,
     client_msg_id: str | None = None,
+    already_subscribed: bool = False,
+    force_turn_start: bool = False,
 ) -> DaemonTurnObservation:
     thread_id = thread.thread_id
     if client_msg_id is None:
@@ -2748,26 +3053,27 @@ def _dispatch_and_observe_turn(
     target_turn_id: str | None = None
     dispatch_method: Literal["thread/queue/add", "turn/start"] = "thread/queue/add"
     queued_behind_active_turn = False
-    subscribed = False
+    subscribed = already_subscribed
 
     try:
         current_status: dict[str, Any] = {
             "type": thread.status,
             "activeFlags": list(thread.active_flags),
         }
-        try:
-            resume_res = rpc.request(
-                "thread/resume",
-                {"threadId": thread_id, "excludeTurns": True},
-                deadline=min(deadline, time.monotonic() + DEFAULT_DISCOVERY_TIMEOUT),
-            )
-            subscribed = True
-            th_after_resume = resume_res.get("thread")
-            if isinstance(th_after_resume, dict) and isinstance(th_after_resume.get("status"), dict):
-                current_status = th_after_resume["status"]
-        except JsonRpcError as exc:
-            if "no rollout found" not in exc.rpc_message.lower():
-                raise DriverRuntimeError(str(exc)) from exc
+        if not subscribed:
+            try:
+                resume_res = rpc.request(
+                    "thread/resume",
+                    {"threadId": thread_id, "excludeTurns": True},
+                    deadline=min(deadline, time.monotonic() + DEFAULT_DISCOVERY_TIMEOUT),
+                )
+                subscribed = True
+                th_after_resume = resume_res.get("thread")
+                if isinstance(th_after_resume, dict) and isinstance(th_after_resume.get("status"), dict):
+                    current_status = th_after_resume["status"]
+            except JsonRpcError as exc:
+                if not _is_unmaterialized_rollout_error(exc):
+                    raise DriverRuntimeError(str(exc)) from exc
 
         if subscribed:
             while rpc.has_pending():
@@ -2849,10 +3155,14 @@ def _dispatch_and_observe_turn(
 
         is_active = current_status.get("type") == "active"
         has_turn_overrides = (
-            req.model is not None or req.effort is not None or schema_dict is not None
+            force_turn_start
+            or req.model is not None
+            or req.effort is not None
+            or req.fast
+            or schema_dict is not None
         )
 
-        if is_active and (req.model is not None or req.effort is not None):
+        if is_active and (req.model is not None or req.effort is not None or req.fast):
             while is_active:
                 msg = rpc.next_message(deadline)
                 event_count += 1
@@ -2935,6 +3245,8 @@ def _dispatch_and_observe_turn(
                 turn_params["model"] = req.model
             if req.effort is not None:
                 turn_params["effort"] = req.effort
+            if req.fast:
+                turn_params["serviceTier"] = _validate_codex_service_tier("priority")
             if schema_dict is not None:
                 turn_params["outputSchema"] = schema_dict
             start_res = rpc.request("turn/start", turn_params, deadline=deadline)
@@ -2969,7 +3281,7 @@ def _dispatch_and_observe_turn(
                         post_status_type = str(th_after["status"].get("type") or "active")
                     break
                 except JsonRpcError as exc:
-                    if "no rollout found" not in exc.rpc_message.lower():
+                    if not _is_unmaterialized_rollout_error(exc):
                         raise DriverRuntimeError(str(exc)) from exc
                     rpc.wait_readable(0.05)
             if (
@@ -3362,33 +3674,330 @@ def _resolve_image_paths(raw_images: list[str] | None) -> tuple[Path, ...]:
     return tuple(resolved)
 
 
+def _load_optional_schema_dict(raw_schema: str | None) -> tuple[Path | None, dict[str, Any] | None]:
+    if not raw_schema:
+        return None, None
+    schema_path = Path(raw_schema)
+    if not schema_path.is_file():
+        raise ValidationError(f"Schema file does not exist: {schema_path}")
+    try:
+        loaded_schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValidationError(f"Invalid JSON in schema file {schema_path}: {exc}") from exc
+    if not isinstance(loaded_schema, dict):
+        raise ValidationError(f"Schema file must contain a JSON object: {schema_path}")
+    return schema_path.resolve(), loaded_schema
+
+
+def _build_daemon_audit_summary(
+    observation: DaemonTurnObservation,
+    thread_id: str,
+    endpoint: DaemonEndpoint,
+    req: AttachRequest,
+    effective_cwd: Path,
+    log_path: Path,
+    base_sha: str | None,
+    full_output: bool,
+) -> tuple[AuditSummary, int]:
+    if req.output_last_message is not None and observation.final_message:
+        req.output_last_message.parent.mkdir(parents=True, exist_ok=True)
+        req.output_last_message.write_text(observation.final_message, encoding="utf-8")
+
+    errors = list(observation.errors)
+    receipt, receipt_valid = parse_receipt(observation.final_message)
+    if req.schema_path is not None and observation.status == "completed" and receipt_valid is not True:
+        _append_unique(
+            errors,
+            "receipt_validation_failed: Final agent message did not satisfy the required receipt schema.",
+        )
+    if req.mode == "scout" and observation.changed_files:
+        _append_unique(
+            errors,
+            "scout_contract_violation: File changes were emitted during a read-only scout attach.",
+        )
+
+    summary_final_message: str | None = (
+        None if (receipt_valid is True and not full_output) else observation.final_message
+    )
+    commands = (
+        observation.commands
+        if full_output
+        else [_compact_command_record(record) for record in observation.commands]
+    )
+    git_diff_files = collect_git_diff_files(
+        effective_cwd if effective_cwd.exists() else None,
+        base=base_sha,
+    )
+    ok_turn = (
+        observation.status == "completed"
+        and (req.schema_path is None or receipt_valid is True)
+        and not (req.mode == "scout" and observation.changed_files)
+    )
+    exit_code = EXIT_OK if ok_turn else EXIT_ERROR
+    summary = AuditSummary(
+        worker="codex",
+        mode=req.mode,
+        session_id=thread_id,
+        exit_code=exit_code,
+        commands=commands,
+        changed_files=observation.changed_files,
+        git_diff_files=git_diff_files,
+        errors=errors,
+        final_message=summary_final_message,
+        receipt=receipt,
+        receipt_valid=receipt_valid,
+        usage=observation.usage,
+        raw_log=str(log_path),
+        command=["codex-app-server", endpoint.display(), observation.dispatch_method, thread_id],
+        status=observation.status,
+    )
+    return summary, exit_code
+
+
+def _record_and_observe_daemon_turn(
+    rpc: AppServerRpcClient,
+    endpoint: DaemonEndpoint,
+    thread: LoadedTuiThread,
+    req: AttachRequest,
+    effective_cwd: Path,
+    prompt: str,
+    schema_dict: dict[str, Any] | None,
+    log_path: Path,
+    preview_limit: int,
+    deadline: float,
+    already_subscribed: bool = False,
+    force_turn_start: bool = False,
+) -> DaemonTurnObservation:
+    with log_path.open("w", encoding="utf-8") as log_f:
+        client_msg_id = str(uuid.uuid4())
+        log_f.write(
+            json.dumps(
+                {
+                    "type": "attach.session",
+                    "thread_id": thread.thread_id,
+                    "client_user_message_id": client_msg_id,
+                    "cwd": str(effective_cwd),
+                    "endpoint": endpoint.display(),
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+        log_f.flush()
+
+        def _write_log_frame(frame_msg: dict[str, Any]) -> None:
+            log_f.write(json.dumps(frame_msg, ensure_ascii=False) + "\n")
+            log_f.flush()
+
+        rpc.set_log_sink(_write_log_frame)
+        try:
+            observation = _dispatch_and_observe_turn(
+                rpc=rpc,
+                thread=thread,
+                req=req,
+                prompt=prompt,
+                schema_dict=schema_dict,
+                preview_limit=preview_limit,
+                deadline=deadline,
+                client_msg_id=client_msg_id,
+                already_subscribed=already_subscribed,
+                force_turn_start=force_turn_start,
+            )
+        finally:
+            rpc.set_log_sink(None)
+        log_f.write(
+            json.dumps(
+                {
+                    "type": "attach.turn",
+                    "thread_id": thread.thread_id,
+                    "turn_id": observation.turn_id,
+                    "client_user_message_id": observation.client_user_message_id,
+                    "queued_behind_active_turn": observation.queued_behind_active_turn,
+                    "status": observation.status,
+                    "errors": observation.errors,
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+        log_f.flush()
+    return observation
+
+
+def _run_codex_via_daemon(
+    args: argparse.Namespace,
+    resolved_cwd: Path,
+    schema_path: Path | None,
+    schema_dict: dict[str, Any] | None,
+    out_msg: Path | None,
+    images: tuple[Path, ...],
+    prompt: str,
+) -> int:
+    if args.timeout <= 0:
+        raise ValidationError("--timeout must be greater than 0.")
+    effort = _validate_codex_effort(args.effort or "medium")
+    _maybe_exclude_local_prompt_dir(resolved_cwd, args.prompt_file)
+    log_path = _prepare_log_path(
+        Path(args.log_dir) if args.log_dir else None,
+        "codex",
+        args.mode,
+    )
+    preview_limit = FULL_OUTPUT_PREVIEW_LIMIT if args.full_output else OUTPUT_PREVIEW_LIMIT
+
+    req = AttachRequest(
+        worker="codex",
+        mode=args.mode,
+        cwd=resolved_cwd,
+        effort=effort,
+        model=args.model,
+        fast=args.fast,
+        schema_path=schema_path,
+        output_last_message=out_msg,
+        images=images,
+        timeout=args.timeout,
+        wait_for_approval=False,
+        remote=args.remote,
+        remote_auth_token_env=args.remote_auth_token_env,
+    )
+    codex_home = _resolve_codex_home()
+    endpoint = resolve_daemon_endpoint(
+        remote=req.remote,
+        remote_auth_token_env=req.remote_auth_token_env,
+        codex_home=codex_home,
+    )
+    deadline = time.monotonic() + req.timeout
+
+    lock_cm = (
+        acquire_ship_lock(resolved_cwd, "daemon-ship")
+        if req.mode == "ship"
+        else contextlib.nullcontext()
+    )
+    with lock_cm:
+        try:
+            rpc, endpoint = _connect_daemon_rpc(
+                endpoint=endpoint,
+                connect_timeout=min(req.timeout, DEFAULT_DISCOVERY_TIMEOUT),
+                auto_start=not args.no_auto_daemon,
+                remote=req.remote,
+                remote_auth_token_env=req.remote_auth_token_env,
+                codex_home=codex_home,
+            )
+        except DaemonOfflineError as exc:
+            _emit_json(
+                {
+                    "ok": False,
+                    "error": "daemon_offline",
+                    "message": str(exc),
+                    "endpoint": exc.endpoint,
+                }
+            )
+            return EXIT_ERROR
+
+        started_thread: LoadedTuiThread | None = None
+        try:
+            rpc.initialize(deadline=min(deadline, time.monotonic() + DEFAULT_DISCOVERY_TIMEOUT))
+            start_params = _build_thread_start_params(
+                cwd=resolved_cwd,
+                mode=req.mode,
+                model=req.model,
+                effort=effort,
+                fast=req.fast,
+                with_mcp=args.with_mcp,
+                approval_policy="never",
+            )
+            start_res = rpc.request(
+                "thread/start",
+                start_params,
+                deadline=min(deadline, time.monotonic() + DEFAULT_DISCOVERY_TIMEOUT),
+            )
+            started_thread = _synthesize_started_thread(
+                start_res, fallback_cwd=resolved_cwd, model=req.model
+            )
+            observation = _record_and_observe_daemon_turn(
+                rpc=rpc,
+                endpoint=endpoint,
+                thread=started_thread,
+                req=req,
+                effective_cwd=resolved_cwd,
+                prompt=prompt,
+                schema_dict=schema_dict,
+                log_path=log_path,
+                preview_limit=preview_limit,
+                deadline=deadline,
+                already_subscribed=True,
+                force_turn_start=True,
+            )
+        finally:
+            if started_thread is not None and not args.keep_loaded:
+                rpc.archive_quietly(started_thread.thread_id)
+            rpc.close()
+
+    summary, exit_code = _build_daemon_audit_summary(
+        observation=observation,
+        thread_id=started_thread.thread_id,
+        endpoint=endpoint,
+        req=req,
+        effective_cwd=resolved_cwd,
+        log_path=log_path,
+        base_sha=args.base,
+        full_output=args.full_output,
+    )
+    _emit_json(_serialize_audit_summary(summary, full_output=args.full_output))
+    return exit_code
+
+
 def _handle_run(args: argparse.Namespace) -> int:
     adapter = get_adapter(args.worker)
+    if args.daemon and adapter.name != "codex":
+        raise ValidationError("--daemon is only supported for --worker codex.")
+    if args.keep_loaded and not args.daemon:
+        raise ValidationError("--keep-loaded requires --daemon.")
+    if args.no_auto_daemon and not args.daemon:
+        raise ValidationError("--no-auto-daemon requires --daemon.")
+
     cwd = Path(args.cwd)
     if not cwd.is_dir():
         raise ValidationError(f"Working directory does not exist: {cwd}")
+    resolved_cwd = cwd.resolve()
+    out_msg = Path(args.output_last_message).resolve() if args.output_last_message else None
+    images = _resolve_image_paths(args.image)
+    raw_prompt = _read_prompt(args.prompt_file, args.prompt, required=True)
+    assert raw_prompt is not None
+    prompt = _apply_prompt_preamble(raw_prompt, raw_prompt=args.raw_prompt)
+
+    if args.daemon:
+        schema_path, schema_dict = _load_optional_schema_dict(args.schema)
+        return _run_codex_via_daemon(
+            args=args,
+            resolved_cwd=resolved_cwd,
+            schema_path=schema_path,
+            schema_dict=schema_dict,
+            out_msg=out_msg,
+            images=images,
+            prompt=prompt,
+        )
+
     schema_path = Path(args.schema) if args.schema else None
     if schema_path is not None and not schema_path.is_file():
         raise ValidationError(f"Schema file does not exist: {schema_path}")
-    out_msg = Path(args.output_last_message) if args.output_last_message else None
     add_dirs = tuple(Path(p) for p in (args.add_dir or []))
-    images = _resolve_image_paths(args.image)
     req = RunRequest(
         worker=adapter.name,
         mode=args.mode,
-        cwd=cwd.resolve(),
+        cwd=resolved_cwd,
         effort=args.effort,
         model=args.model,
+        fast=args.fast,
+        with_mcp=args.with_mcp,
         permission_mode=args.permission_mode,
         approval_policy=args.approval_policy,
         allow_danger=args.allow_danger,
         schema_path=schema_path.resolve() if schema_path else None,
-        output_last_message=out_msg.resolve() if out_msg else None,
+        output_last_message=out_msg,
         add_dirs=add_dirs,
         images=images,
     )
     cmd = adapter.build_run_cmd(req)
-    prompt = _read_prompt(args.prompt_file, args.prompt, required=True)
     _maybe_exclude_local_prompt_dir(req.cwd, args.prompt_file)
     log_path = _prepare_log_path(Path(args.log_dir) if args.log_dir else None, adapter.name, req.mode)
 
@@ -3431,6 +4040,8 @@ def _handle_resume(args: argparse.Namespace) -> int:
         cwd=cwd.resolve(),
         effort=args.effort,
         model=args.model,
+        fast=args.fast,
+        with_mcp=args.with_mcp,
         permission_mode=args.permission_mode,
         approval_policy=args.approval_policy,
         allow_danger=args.allow_danger,
@@ -3440,7 +4051,9 @@ def _handle_resume(args: argparse.Namespace) -> int:
         images=images,
     )
     cmd = adapter.build_resume_cmd(req)
-    prompt = _read_prompt(args.prompt_file, args.prompt, required=True)
+    raw_prompt = _read_prompt(args.prompt_file, args.prompt, required=True)
+    assert raw_prompt is not None
+    prompt = _apply_prompt_preamble(raw_prompt, raw_prompt=args.raw_prompt)
     _maybe_exclude_local_prompt_dir(req.cwd, args.prompt_file)
     log_path = _prepare_log_path(Path(args.log_dir) if args.log_dir else None, adapter.name, req.mode)
 
@@ -3533,8 +4146,18 @@ def _handle_sessions(args: argparse.Namespace) -> int:
         codex_home=codex_home,
     )
     deadline = time.monotonic() + args.timeout
+    ensure_daemon = bool(getattr(args, "ensure_daemon", False)) and not bool(
+        getattr(args, "no_auto_daemon", False)
+    )
     try:
-        rpc = AppServerRpcClient(endpoint, connect_timeout=min(args.timeout, 5.0))
+        rpc, endpoint = _connect_daemon_rpc(
+            endpoint=endpoint,
+            connect_timeout=min(args.timeout, 5.0),
+            auto_start=ensure_daemon,
+            remote=args.remote,
+            remote_auth_token_env=args.remote_auth_token_env,
+            codex_home=codex_home,
+        )
     except DaemonOfflineError as exc:
         locked = _find_conflicting_writer_locks(
             codex_home,
@@ -3655,6 +4278,10 @@ def _handle_attach(args: argparse.Namespace) -> int:
         raise ValidationError("Provide --cwd <dir> or --session <thread_id>.")
     if args.session is not None and not args.session.strip():
         raise ValidationError("--session must not be empty.")
+    if args.create and args.cwd is None:
+        raise ValidationError("--create requires --cwd <dir>.")
+    if args.create and args.session:
+        raise ValidationError("--create cannot be combined with --session <thread_id>.")
 
     target_cwd: Path | None = None
     if args.cwd is not None:
@@ -3664,23 +4291,12 @@ def _handle_attach(args: argparse.Namespace) -> int:
         target_cwd = raw_cwd.resolve()
 
     effort = _validate_codex_effort(args.effort) if args.effort is not None else None
-    schema_path = Path(args.schema) if args.schema else None
-    schema_dict: dict[str, Any] | None = None
-    if schema_path is not None:
-        if not schema_path.is_file():
-            raise ValidationError(f"Schema file does not exist: {schema_path}")
-        try:
-            loaded_schema = json.loads(schema_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise ValidationError(f"Invalid JSON in schema file {schema_path}: {exc}") from exc
-        if not isinstance(loaded_schema, dict):
-            raise ValidationError(f"Schema file must contain a JSON object: {schema_path}")
-        schema_dict = loaded_schema
-
+    schema_path, schema_dict = _load_optional_schema_dict(args.schema)
     out_msg = Path(args.output_last_message).resolve() if args.output_last_message else None
     images = _resolve_image_paths(args.image)
-    prompt = _read_prompt(args.prompt_file, args.prompt, required=True)
-    assert prompt is not None
+    raw_prompt = _read_prompt(args.prompt_file, args.prompt, required=True)
+    assert raw_prompt is not None
+    prompt = _apply_prompt_preamble(raw_prompt, raw_prompt=args.raw_prompt)
 
     req = AttachRequest(
         worker="codex",
@@ -3688,9 +4304,11 @@ def _handle_attach(args: argparse.Namespace) -> int:
         cwd=target_cwd,
         session_id=args.session.strip() if args.session else None,
         select_latest=args.latest,
+        create=args.create,
         effort=effort,
         model=args.model,
-        schema_path=schema_path.resolve() if schema_path else None,
+        fast=args.fast,
+        schema_path=schema_path,
         output_last_message=out_msg,
         images=images,
         timeout=args.timeout,
@@ -3706,6 +4324,7 @@ def _handle_attach(args: argparse.Namespace) -> int:
         codex_home=codex_home,
     )
     deadline = time.monotonic() + req.timeout
+    auto_daemon = (req.create or args.ensure_daemon) and not args.no_auto_daemon
 
     try:
         rpc = AppServerRpcClient(endpoint, connect_timeout=min(req.timeout, DEFAULT_DISCOVERY_TIMEOUT))
@@ -3716,24 +4335,50 @@ def _handle_attach(args: argparse.Namespace) -> int:
             session_id=req.session_id,
             excluded_ids=set(),
         )
-        offline_resolution = (
-            ThreadResolution(
-                kind="desktop_writer_lock",
-                locked_thread_ids=tuple(locked),
-                endpoint=exc.endpoint,
-                detail=(
-                    f"Active session(s) {', '.join(locked)} are owned by Codex Desktop or VS Code "
-                    "(Layer B IPC, unsupported by CLI daemon attach)."
+        if locked:
+            return _emit_resolution_failure(
+                ThreadResolution(
+                    kind="desktop_writer_lock",
+                    locked_thread_ids=tuple(locked),
+                    endpoint=exc.endpoint,
+                    detail=(
+                        f"Active session(s) {', '.join(locked)} are owned by Codex Desktop or VS Code "
+                        "(Layer B IPC, unsupported by CLI daemon attach)."
+                    ),
                 ),
+                req.cwd,
+                req.session_id,
             )
-            if locked
-            else ThreadResolution(
-                kind="daemon_offline",
-                endpoint=exc.endpoint,
-                detail=str(exc),
+        if auto_daemon:
+            try:
+                rpc, endpoint = _connect_daemon_rpc(
+                    endpoint=endpoint,
+                    connect_timeout=min(req.timeout, DEFAULT_DISCOVERY_TIMEOUT),
+                    auto_start=True,
+                    remote=req.remote,
+                    remote_auth_token_env=req.remote_auth_token_env,
+                    codex_home=codex_home,
+                )
+            except DaemonOfflineError as retry_exc:
+                return _emit_resolution_failure(
+                    ThreadResolution(
+                        kind="daemon_offline",
+                        endpoint=retry_exc.endpoint,
+                        detail=str(retry_exc),
+                    ),
+                    req.cwd,
+                    req.session_id,
+                )
+        else:
+            return _emit_resolution_failure(
+                ThreadResolution(
+                    kind="daemon_offline",
+                    endpoint=exc.endpoint,
+                    detail=str(exc),
+                ),
+                req.cwd,
+                req.session_id,
             )
-        )
-        return _emit_resolution_failure(offline_resolution, req.cwd, req.session_id)
 
     try:
         rpc.initialize(deadline=min(deadline, time.monotonic() + DEFAULT_DISCOVERY_TIMEOUT))
@@ -3746,11 +4391,20 @@ def _handle_attach(args: argparse.Namespace) -> int:
             select_latest=req.select_latest,
             deadline=min(deadline, time.monotonic() + DEFAULT_DISCOVERY_TIMEOUT),
         )
-        if resolution.kind != "matched" or resolution.thread is None:
+        created_thread = False
+        if resolution.kind == "not_found" and req.create and req.cwd is not None:
+            matched_thread: LoadedTuiThread | None = None
+            created_thread = True
+        elif resolution.kind != "matched" or resolution.thread is None:
             return _emit_resolution_failure(resolution, req.cwd, req.session_id)
+        else:
+            matched_thread = resolution.thread
 
-        matched_thread = resolution.thread
-        effective_cwd = req.cwd if req.cwd is not None else Path(matched_thread.resolved_cwd)
+        effective_cwd = (
+            req.cwd
+            if req.cwd is not None
+            else Path(matched_thread.resolved_cwd)  # type: ignore[union-attr]
+        )
         _maybe_exclude_local_prompt_dir(effective_cwd, args.prompt_file)
         log_path = _prepare_log_path(
             Path(args.log_dir) if args.log_dir else None,
@@ -3764,109 +4418,53 @@ def _handle_attach(args: argparse.Namespace) -> int:
             if req.mode == "ship" and effective_cwd.exists()
             else contextlib.nullcontext()
         )
-        with lock_cm, log_path.open("w", encoding="utf-8") as log_f:
-            client_msg_id = str(uuid.uuid4())
-            log_f.write(
-                json.dumps(
-                    {
-                        "type": "attach.session",
-                        "thread_id": matched_thread.thread_id,
-                        "client_user_message_id": client_msg_id,
-                        "cwd": str(effective_cwd),
-                        "endpoint": endpoint.display(),
-                    },
-                    ensure_ascii=False,
+        with lock_cm:
+            if created_thread:
+                assert req.cwd is not None
+                start_params = _build_thread_start_params(
+                    cwd=req.cwd,
+                    mode=req.mode,
+                    model=req.model,
+                    effort=req.effort,
+                    fast=req.fast,
+                    with_mcp=True,
+                    approval_policy=None if req.wait_for_approval else "never",
                 )
-                + "\n"
-            )
-            log_f.flush()
-
-            def _write_log_frame(frame_msg: dict[str, Any]) -> None:
-                log_f.write(json.dumps(frame_msg, ensure_ascii=False) + "\n")
-                log_f.flush()
-
-            rpc.set_log_sink(_write_log_frame)
-            observation = _dispatch_and_observe_turn(
+                start_res = rpc.request(
+                    "thread/start",
+                    start_params,
+                    deadline=min(deadline, time.monotonic() + DEFAULT_DISCOVERY_TIMEOUT),
+                )
+                matched_thread = _synthesize_started_thread(
+                    start_res, fallback_cwd=req.cwd, model=req.model
+                )
+            assert matched_thread is not None
+            observation = _record_and_observe_daemon_turn(
                 rpc=rpc,
+                endpoint=endpoint,
                 thread=matched_thread,
                 req=req,
+                effective_cwd=effective_cwd,
                 prompt=prompt,
                 schema_dict=schema_dict,
+                log_path=log_path,
                 preview_limit=preview_limit,
                 deadline=deadline,
-                client_msg_id=client_msg_id,
+                already_subscribed=created_thread,
+                force_turn_start=created_thread,
             )
-            rpc.set_log_sink(None)
-            log_f.write(
-                json.dumps(
-                    {
-                        "type": "attach.turn",
-                        "thread_id": matched_thread.thread_id,
-                        "turn_id": observation.turn_id,
-                        "client_user_message_id": observation.client_user_message_id,
-                        "queued_behind_active_turn": observation.queued_behind_active_turn,
-                        "status": observation.status,
-                        "errors": observation.errors,
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n"
-            )
-            log_f.flush()
     finally:
         rpc.close()
 
-    if req.output_last_message is not None and observation.final_message:
-        req.output_last_message.parent.mkdir(parents=True, exist_ok=True)
-        req.output_last_message.write_text(observation.final_message, encoding="utf-8")
-
-    errors = list(observation.errors)
-    receipt, receipt_valid = parse_receipt(observation.final_message)
-    if req.schema_path is not None and observation.status == "completed" and receipt_valid is not True:
-        _append_unique(
-            errors,
-            "receipt_validation_failed: Final agent message did not satisfy the required receipt schema.",
-        )
-    if req.mode == "scout" and observation.changed_files:
-        _append_unique(
-            errors,
-            "scout_contract_violation: File changes were emitted during a read-only scout attach.",
-        )
-
-    summary_final_message: str | None = (
-        None if (receipt_valid is True and not args.full_output) else observation.final_message
-    )
-    commands = (
-        observation.commands
-        if args.full_output
-        else [_compact_command_record(record) for record in observation.commands]
-    )
-    git_diff_files = collect_git_diff_files(
-        effective_cwd if effective_cwd.exists() else None,
-        base=args.base,
-    )
-    ok_turn = (
-        observation.status == "completed"
-        and (req.schema_path is None or receipt_valid is True)
-        and not (req.mode == "scout" and observation.changed_files)
-    )
-    exit_code = EXIT_OK if ok_turn else EXIT_ERROR
-    summary = AuditSummary(
-        worker="codex",
-        mode=req.mode,
-        session_id=matched_thread.thread_id,
-        exit_code=exit_code,
-        commands=commands,
-        changed_files=observation.changed_files,
-        git_diff_files=git_diff_files,
-        errors=errors,
-        final_message=summary_final_message,
-        receipt=receipt,
-        receipt_valid=receipt_valid,
-        usage=observation.usage,
-        raw_log=str(log_path),
-        command=["codex-app-server", endpoint.display(), observation.dispatch_method, matched_thread.thread_id],
-        status=observation.status,
+    summary, exit_code = _build_daemon_audit_summary(
+        observation=observation,
+        thread_id=matched_thread.thread_id,
+        endpoint=endpoint,
+        req=req,
+        effective_cwd=effective_cwd,
+        log_path=log_path,
+        base_sha=args.base,
+        full_output=args.full_output,
     )
     _emit_json(_serialize_audit_summary(summary, full_output=args.full_output))
     return exit_code
@@ -3947,8 +4545,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--cwd", required=True)
     p_run.add_argument("--prompt-file")
     p_run.add_argument("--prompt")
+    p_run.add_argument("--raw-prompt", action="store_true")
     p_run.add_argument("--effort")
     p_run.add_argument("--model")
+    p_run.add_argument("--fast", action="store_true")
+    p_run.add_argument("--with-mcp", action="store_true")
+    p_run.add_argument("--daemon", action="store_true")
+    p_run.add_argument("--no-auto-daemon", action="store_true")
+    p_run.add_argument("--keep-loaded", action="store_true")
+    p_run.add_argument("--remote")
+    p_run.add_argument("--remote-auth-token-env")
+    p_run.add_argument("--timeout", type=float, default=DEFAULT_ATTACH_TIMEOUT)
     p_run.add_argument("--permission-mode")
     p_run.add_argument("--approval-policy")
     p_run.add_argument("--allow-danger", action="store_true")
@@ -3968,8 +4575,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_res.add_argument("--cwd", required=True)
     p_res.add_argument("--prompt-file")
     p_res.add_argument("--prompt")
+    p_res.add_argument("--raw-prompt", action="store_true")
     p_res.add_argument("--effort")
     p_res.add_argument("--model")
+    p_res.add_argument("--fast", action="store_true")
+    p_res.add_argument("--with-mcp", action="store_true")
     p_res.add_argument("--permission-mode")
     p_res.add_argument("--approval-policy")
     p_res.add_argument("--allow-danger", action="store_true")
@@ -4012,6 +4622,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_ses.add_argument("--worker", default="codex", choices=sorted(ADAPTERS))
     p_ses.add_argument("--cwd")
+    p_ses.add_argument("--ensure-daemon", action="store_true")
     p_ses.add_argument("--remote")
     p_ses.add_argument("--remote-auth-token-env")
     p_ses.add_argument("--timeout", type=float, default=DEFAULT_DISCOVERY_TIMEOUT)
@@ -4026,11 +4637,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_att.add_argument("--session")
     p_att.add_argument("--latest", action="store_true")
     p_att.add_argument("--list", action="store_true")
+    p_att.add_argument("--create", action="store_true")
+    p_att.add_argument("--ensure-daemon", action="store_true")
+    p_att.add_argument("--no-auto-daemon", action="store_true")
     p_att.add_argument("--mode", default="ship", choices=["scout", "ship"])
     p_att.add_argument("--prompt-file")
     p_att.add_argument("--prompt")
+    p_att.add_argument("--raw-prompt", action="store_true")
     p_att.add_argument("--effort")
     p_att.add_argument("--model")
+    p_att.add_argument("--fast", action="store_true")
     p_att.add_argument("--schema")
     p_att.add_argument("--output-last-message")
     p_att.add_argument("--image", action="append")

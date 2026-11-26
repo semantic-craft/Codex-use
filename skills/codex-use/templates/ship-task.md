@@ -1,24 +1,23 @@
+Dispatched as a subagent for a bounded slice; skip workflow-routing skills such as using-ryugi and execute the task directly.
+
 # Ship Task Brief
 
-## Workspace and Contract
+**Workspace:** isolated git worktree `<worktree-path>` on `<base-sha>`. Direct edits and local verify are authorized.
 
-Isolated git worktree `<worktree-path>` on baseline commit `<base-sha>`. Direct edits and local verification are authorized.
-
-Finish all authorized steps in this turn. Make reversible assumptions for minor unspecified details and log them in the receipt. Never stop early at "suggested next steps." Do not create extra worktrees, push branches, or open PRs.
+**Contract:** finish all steps in this turn, log reversible assumptions in the receipt, and never stop at "suggested next steps." No extra worktrees, pushes, or PRs.
 
 ## Objective, Non-Goals, and Reuse
 
-- **Objective:** `<concrete change to implement or refactor>`
-- **Non-goals:** `<out-of-scope behavior/files to leave untouched>`
-- **Targets and reuse:** `<path/to/file.py>` (reuse `<existing_symbol>`), `<path/to/test_file.py>` (regression coverage only where requested or needed)
+- **Objective:** `<concrete change>`
+- **Non-goals:** `<out-of-scope behavior/files>`
+- **Targets:** `<path/to/file.py>` (reuse `<symbol>`), `<path/to/test_file.py>`
 
 ## Ban List and Verification
 
-- No unrequested abstractions, compatibility shims, defensive error swallowing, narrating comments, or code-golfing.
-- **Diff budget (scope guard, not readability compression):** <= `<N>` files, ~`<M>` net lines.
-- **Canonical verify command:** `<single verification command>`
-- **Resource etiquette:** bound build/test concurrency, avoid stealing desktop focus, and clean up spawned processes or temp files.
+- No unrequested abstractions, shims, error swallowing, narrating comments, or code-golfing.
+- **Budget:** <= `<N>` files, ~`<M>` net lines.
+- **Verify:** `<single command>` (bound concurrency; avoid focus stealing; clean up temp processes/files).
 
 ## Receipt (`schemas/receipt.schema.json`)
 
-Return self-contained JSON: `summary` (plain-language outcome for a first-time reader), `changed_files`, `verification` (commands actually run with real exit codes), `assumptions_and_risks`, and `symbol_changes`.
+Return JSON: `summary`, `changed_files`, `verification` (commands + real exit codes), `assumptions_and_risks`, `symbol_changes`.
